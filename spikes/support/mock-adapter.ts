@@ -3,10 +3,10 @@
  * (`packages/core/agent-loop/tests/mock-adapter.ts`). That file is not a
  * public export, and this package does not import the DSH test tree.
  */
-import type { GenerateOptions, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmResolvedModelInfo, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { LlmAdapter, ToolCallId } from '@deepseek-ai/dsh-llm'
 
-export function textResponse(text: string, usage?: { inputTokens: number; outputTokens: number; cacheReadTokens?: number }): StreamChunk[] {
+export function textResponse(text: string, usage?: Partial<TokenUsage>): StreamChunk[] {
   return [
     { type: 'block-start', index: 0, blockType: 'text' },
     { type: 'text-delta', index: 0, text },

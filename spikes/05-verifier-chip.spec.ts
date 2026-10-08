@@ -101,6 +101,32 @@ describe('spike 5: /verifier chip and command', () => {
   })
 })
 
+describe('spike 5: enabledByDefault', () => {
+  it('seeds verifier.active from enabledByDefault before any /verifier command', async () => {
+    const on = await mountLoop(new MockAdapter([]))
+    await on.plugin(CommandRuntime)
+    await on.plugin(plugin, { enabledByDefault: true })
+    const onAgent = await createAgent(on, 'spike-5-default-on')
+    expect(on.sessionProjections.stateOf(onAgent.session, 'verifier')?.active).toBe(true)
+    expect(logJson(onAgent)).not.toContain('command/run')
+    expect(on.sessionProjections.stateOf(onAgent.session, 'verifierRoute')).toEqual({ pending: null, lastUsed: null })
+    expect(on.sessionProjections.stateOf(onAgent.session, 'verifierLedger')).toEqual({ byRoute: {} })
+    expect(on.sessionProjections.stateOf(onAgent.session, 'verifierJudge')).toEqual({ lines: [], names: {} })
+
+    const off = await mountLoop(new MockAdapter([]))
+    await off.plugin(CommandRuntime)
+    await off.plugin(plugin, { enabledByDefault: false })
+    const offAgent = await createAgent(off, 'spike-5-default-off')
+    expect(off.sessionProjections.stateOf(offAgent.session, 'verifier')?.active).toBe(false)
+
+    const bare = await mountLoop(new MockAdapter([]))
+    await bare.plugin(CommandRuntime)
+    await bare.plugin(plugin, {})
+    const bareAgent = await createAgent(bare, 'spike-5-default-bare')
+    expect(bare.sessionProjections.stateOf(bareAgent.session, 'verifier')?.active).toBe(false)
+  })
+})
+
 describe('spike 5 slot core', () => {
   it('list registration requires an id, matching conversation.input.left', () => {
     const core = new SlotCore()

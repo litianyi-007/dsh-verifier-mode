@@ -4,7 +4,7 @@
 
 上游 [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) 当前 `origin/master` HEAD 是 `5badb15009ae1756c3afe0ae0cef1faafc290ccc`（2026-10-03 11:48 +0800，Merge PR #5648 release-dsh-0.2.1-alpha.1）。根 `package.json` 版本是 `0.2.1-alpha.1`。与设计核准时的 SHA 相同，**没有 drift**。本机 checkout 在 `/home/ubuntu/deepseek-harness`，没有改上游。
 
-Spike 用 DSH 源码（`tsconfig.base.json` 的 path）加上本仓库的 `MockAdapter`，以及本机 HTTP mock。没有 DeepSeek、TypeSafe、Jev 或任何付费模型调用，也没有 API key。`npm test` 全绿：8 个文件、13 个用例。
+Spike 用 DSH 源码（`tsconfig.base.json` 的 path）加上本仓库的 `MockAdapter`，以及本机 HTTP mock。没有 DeepSeek、TypeSafe、Jev 或任何付费模型调用，也没有 API key。`npm test` 全绿：8 个文件、15 个用例。
 
 插件包名 `dsh-verifier-mode`。peer 覆盖当前 DSH：`@deepseek-ai/dsh-*` 为 `>=0.2.1-alpha.1 <0.3.0`，`@deepseek-ai/cordis` 为 `>=4.0.5-alpha.1 <5`，`@deepseek-ai/schemastery` 为 `>=3.18.5-alpha.1 <4`。宿主 `inject` 用服务名（`commands`、`sessionProjections`）。`package.json` 的 `dsh.client.inject` 用包名；`src/client/index.ts` 的 `inject` 用服务名（`slots`、`locale`、`remote`、`remote.commands`）。这是当前 SHA 的真实分工，设计正文把两者写在了一起。
 
@@ -42,11 +42,12 @@ Spike 用 DSH 源码（`tsconfig.base.json` 的 path）加上本仓库的 `MockA
 
 ## 2. 用量与当前模型
 
-**试了什么。** `spikes/02-usage-and-model.spec.ts` 三件事：
+**试了什么。** `spikes/02-usage-and-model.spec.ts` 四件事。宿主加载本插件，投影键是 `verifierRoute` 和 `verifierLedger`，读口是 `stateOf`。
 
-1. `ctx.llm.stream` 消费一条带 `cacheReadTokens` / `cacheWriteTokens` / `totalTokens` 的 `usage` chunk。然后再跑主循环一轮。
-2. 装上 `installModelSelection`。第一轮用 `mock/flash`。第二轮之前追加 `model/selection`（`mock/pro`）并改 `selection.current`。在 turn 2 的 pre-step 读 `currentRoute()`。
-3. 只改 `selection.current`，不写 `model/selection`。这是 ACP 的形状。
+1. `ctx.llm.stream` 消费一条带 `cacheReadTokens: 11`、`cacheWriteTokens: 2`、`totalTokens: 17` 的 `usage` chunk。主循环一轮的 `assistant/message.usage` 带上 `inputTokens: 10`、`outputTokens: 8`、`cacheReadTokens: 4`、`cacheWriteTokens: 5`、`reasoningTokens: 7`。
+2. 装上 `installModelSelection`。第一轮用 `mock/flash`。第二轮之前追加 `model/selection`（`mock/pro`），并同时把私有 `selection.current` 设成 `pro`。在 turn 2 的 pre-step 读 `readCurrentRoute()`。
+3. 第一轮 `mock/flash` 落成 `request/header` 之后，再追加 `model/selection`，provider 和 model 仍是 `mock/flash`，只多 `reasoningEffort: 'high'`。
+4. 只改 `selection.current`，不写 `model/selection`。这是 ACP 的形状。同一轮切换不在 MVP 里，这里只把滞后记下来，没有补公开 live ref。
 
 **API。**
 
@@ -55,29 +56,38 @@ Spike 用 DSH 源码（`tsconfig.base.json` 的 path）加上本仓库的 `MockA
 - 主循环用量在 `assistant/message.usage`：`packages/core/session/src/types.ts`。
 - 公开路由没有 live ref。`AgentOptions`（`runtime-types.ts`）是创建时的 `provider` / `model`，之后不改。`session.requestHeader()?.config` 是上一次 `request/header`。
 - Web 的 live 选择在 `packages/core/agent/src/model-selection.ts` 的 `installModelSelection`。`current` 给下一次 assembly，`assembled` 在 `system-prompt/assemble` 时拍下来，`agent/request` 再用它。pre-step 发生在 assemble **之后**（`packages/core/agent-loop/src/agent.ts` 的 `preStep`）。
-- Web 还会写已知事件 `model/selection`：`packages/api/session-controller/src/types.ts`，折叠在 `packages/api/session-controller/src/model-selection-projection.ts`（`next = pending ?? lastUsed`）。`packages/core/session/src/known-event-types.ts` 已收录该事件，插件不依赖 session-controller 服务也能自己折。本仓库的折法在 `src/route.ts`。
+- Web 还会写已知事件 `model/selection`：`packages/api/session-controller/src/types.ts`，折叠在 `packages/api/session-controller/src/model-selection-projection.ts`（`next = pending ?? lastUsed`，并且 `sameSelection` 比较 `reasoningEffort`）。`packages/core/session/src/known-event-types.ts` 已收录该事件，插件不依赖 session-controller 服务也能自己折。本仓库的折法在 `src/route.ts` 的 `verifierRoute`，读口是 `readCurrentRoute` → `stateOf`。生产代码不调用 `snapshotEvents`。`currentRouteFromEvents` 只留给测试。
 - Headless 只在启动时取一次 selection：`packages/bundle/headless/src/index.ts`，不写 `model/selection`，运行中不换模型。
 - ACP 改的是私有 `AcpModelControl.selection`：`packages/acp/acp/src/model-control.ts`，不写 `model/selection`。
 
 **结果。**
 
-- 旁路 `stream` 读到 `cacheReadTokens: 11`。文本 `SIDE-ONLY` 不在 session log。主轮 `assistant/message.usage.inputTokens` 是 10。
-- 写了 `model/selection` 时，turn 2 的 pre-step 上 `currentRoute` 已是 `pro`（source `model/selection`），`requestHeader().config.model` 仍是 `flash`，随后真正发出的 `GenerateOptions.model` 是 `pro`。`agent.options.model` 仍是创建时的 `flash`。
+- 旁路 `stream` 读到 `cacheReadTokens: 11`。文本 `SIDE-ONLY` 不在 session log，也不在 `verifierLedger`。主轮账是 `mock/flash` 一条：`inputTokens 10`、`outputTokens 8`、`cacheReadTokens 4`、`cacheWriteTokens 5`、`reasoningTokens 7`。只抄 `inputTokens` 的账过不了这个断言。
+- 写了 `model/selection` 时，turn 2 的 pre-step 上 `readCurrentRoute` 已是 `pro`（source `model/selection`），`requestHeader().config.model` 仍是 `flash`。随后发出的 `GenerateOptions.model` 是 `pro`，因为测试同时改了私有 `selection.current`。折法读的是 log，请求读的是这个 ref。`agent.options.model` 仍是创建时的 `flash`。
+- 只改 `reasoningEffort` 时，`verifierRoute` 状态引用不变，`readCurrentRoute` 仍是 `flash` / `request/header`。effort 不进封顶键。
 - 只改私有 ref 时，fold 和 header 都还是 `flash`，请求已经是 `pro`。差一轮。
 
-**设计。** §8.1 的「当前模型」在 Web 上用 `model/selection` 优先、否则 `request/header`、再否则 `agent.options`。这和 Web 投影一致，pre-step 做费用封顶够用。Headless 模型固定，用 `agent.options` 即可。ACP 同一轮看不见切换；设计 §4.1 的命令面是 CLI/Web，不是 ACP。若产品以后要求 ACP 同一轮封顶，才需要 core 或 API 把 `ModelSelectionRef` 公开出来。**P1 不必等这个。**
+**设计。** §8.1 的 session 费用封顶键是 provider + model。`reasoningEffort` 不改变日元上限，只改 effort 的 `model/selection` 也不进入 `currentRoute`。上一版报告写「这和 Web 投影一致」说过了：Web 的 `modelSelection` 把 effort 算进选择身份，这条折法故意不算。Headless 模型固定，用 `agent.options` 即可。ACP 同一轮换模型不在 MVP 范围内，这次没有实现，也不把它列成 P1 要补的 core 接口。
 
-记账以主循环 `assistant/message.usage` 为准。旁路 `ctx.llm.stream`（judge）的用量只在这次 stream 上，调用方要自己累加，它不会出现在 session log 里。
+记账以主循环 `assistant/message.usage` 为准，经 `verifierLedger` 累加。有 `cacheReadTokens`、`cacheWriteTokens`、`reasoningTokens` 就入账；字段缺席记 0。旁路 `ctx.llm.stream`（judge）的用量只在这次 stream 上，调用方要自己累加，它不会出现在 session log 或这条账里。
 
 ## 3. session 摘要
 
-**试了什么。** `spikes/03-session-summary.spec.ts` 注册真实 `echo` 工具，脚本先 tool call 再文本。`summarizeSession(session.snapshotEvents())` 得到 user / tool / assistant 三行。再用 seed 重建 session，摘要字符串全等。
+**试了什么。** `spikes/03-session-summary.spec.ts` 注册真实 `echo` 工具，脚本先 tool call 再文本。生产读口是 `readJudgeDigest` → `stateOf(..., 'verifierJudge')`。测试里另把 `summarizeSession(snapshotEvents())` 和这个读口对成同一段字符串。再用 seed 重建 session，两边仍然全等。
 
-**API。** `packages/core/session/src/index.ts` 的 `snapshotEvents()`。user 文本在 `user/message` 的 `data.content`；assistant 在 `assistant/message` 的 `data.message.content`；工具在 `tool/result` 的 `data.message.content`，`isError` 单独成标记。实现在 `src/summary.ts`。
+**API。** 投影在 `src/summary.ts`，键 `verifierJudge`。user 文本在 `user/message` 的 `data.content`；assistant 在 `assistant/message` 的 `data.message.content`；工具名在 `tool/call` 的 `data.name`，按 `callId` 配到 `tool/result`。`isError` 写成 `ok` 或 `error`。空 assistant 文本（工具调用那条 message）不进摘要。`snapshotEvents` 只出现在测试里，用来交 seed 和对照纯函数。生产代码不调用它。2026-09-09 的废弃说明禁止新的生产扫描；投影注册表自己在 `buildCell` 里的调用是 core 自己的迁移，不授权插件再包一层。
 
-**结果。** 重建后的摘要与原摘要逐字相同，包含 `user:`、`tool ok:`、`assistant: final answer`。
+**结果。** 活 session 和 seed 重建后的摘要都是这三行，逐字相等：
 
-**设计。** judge 的状态可以从 log 纯函数得到，不需要额外 session 事件。`snapshotEvents` 在 DSH 里标了 deprecated，投影注册表自己也还在用它。P1 继续用即可；等 core 给出替代读口再换，不挡 MVP。
+```
+user: use the echo tool
+tool echo ok: from-tool
+assistant: final answer
+```
+
+空的 `assistant:` 或丢掉工具名的 `tool ok:` 过不了这个相等断言。工具结果正文空了（`tool echo ok:`）也过不了。
+
+**设计。** judge 的状态从 log 折进 `verifierJudge`，不需要额外 session 事件。P1 读 `stateOf`，不要在生产路径调用 `snapshotEvents`。
 
 ## 4. `exit_plan_mode` 与 `additionalContexts`
 
@@ -118,9 +128,11 @@ chip 的 `inject` 调 `/verifier on` 和 `/verifier off`。组件 `onClick` 在 
 
 **结果。** 调用序列是 `/verifier on`、`/verifier off`、再 `/verifier on`。log 有 `command/run` 和 `[verifier mode on]`。重载后 `stateOf(..., 'verifier').active` 为 true，下一轮模型请求含这条 notice。按钮文案来自 `t('chip.label')`，英文是 `Verifier`。
 
+另有一条用例：`ctx.plugin(plugin, { enabledByDefault: true })` 之后，不发 `/verifier`，`stateOf(..., 'verifier').active` 已是 true，log 里没有 `command/run`。`enabledByDefault: false` 和 `ctx.plugin(plugin, {})` 都是 false。`init` 里读 schemastery 的 volatile `.get()`，忽略这个旗标时这条用例失败。同一轮还确认 `verifierRoute`、`verifierLedger`、`verifierJudge` 已注册。投影 `stateVersion` 是 2，因为种子语义变了。
+
 **设计。** 命令 + 投影这条链可用，和 `/plan` 同一类。生成出来的 `@deepseek-ai/dsh-commands/remote` 指向未构建的 `lib/`，这次**没有跑 RPC 编解码**。客户端和宿主用的是 plan chip 已经在用的那条签名，中间用同进程适配器接上。P1 在完整 Web 装配里会走到生成客户端；不需要为了这条签名去改 core。
 
-空闲时 `/verifier` 立刻 `append` notice。投影只认 `on` / `off` 的 `command/run` + 成功的 `command/done`。`status` 不改状态。
+空闲时 `/verifier` 立刻 `append` notice。投影只认 `on` / `off` 的 `command/run` + 成功的 `command/done`。`status` 不改状态。`enabledByDefault` 只给新 session 的 `active` 做种子；之后成功的 on/off 以 log 为准。
 
 ## 6. `connection.fetch.register` 与 Jev mock
 
@@ -149,30 +161,31 @@ chip 的 `inject` 调 `/verifier on` 和 `/verifier off`。组件 `onClick` 在 
 
 ## 8. headless `--json` 与暂停 notice
 
-**试了什么。** `spikes/08-headless-json.spec.ts`。pre-step 塞入带 marker 的 pause notice，在 `send` 之前调用 `projectJsonRun`。断言 stdout 行里有 assistant `text` 和 `final`，没有 marker。再 spy `process.stderr.write`：默认 `ctx.logger.warn` 不出现；按 app-boot 的 level 装一个内存 exporter 能收到 warn；显式 `process.stderr.write('dsh: …')` 出现。
+**试了什么。** `spikes/08-headless-json.spec.ts`。pre-step 塞入带 marker 的 pause notice，在 `send` 之前调用 `projectJsonRun`。跑完后只 `dispose()`，不调用 `finish()`。断言 stdout 行里有 assistant `text`，没有 `final`，也没有 marker。再 spy `process.stderr.write`：默认 `ctx.logger.warn` 不出现；按 app-boot 的 level 装一个内存 exporter 能收到 warn；显式 `process.stderr.write('dsh: …')` 出现。这次没有启动 `dsh` CLI，也没有执行 headless `index.ts` 里未导出的 `summarize()`。`finish(text)` 写的 `final` 来自调用方传入的字符串，不能当作 `summarize()` 跑过的证据，所以这条用例不再调用它。
 
 **API。**
 
-- `packages/bundle/headless/src/json-stream.ts` 的 `projectJsonRun`。`switch` 覆盖 turn/step、assistant、tool。`default` 直接 `return`，**丢掉 `user/message`**。`finish()` 写 `{ type: 'final', text }`。
-- 订阅是 `ctx.on('session/event')`。headless 在 `config.json` 时走这个投影（`packages/bundle/headless/src/index.ts`）。
+- `packages/bundle/headless/src/json-stream.ts` 的 `projectJsonRun`。`switch` 覆盖 turn/step、assistant、tool。`default` 直接 `return`，**丢掉 `user/message`**。`assistant/message` 的 text block 写成 `{ type: 'text', text }`。`finish(text)` 另写 `{ type: 'final', text }`，文本就是参数本身。
+- `summarize()` 在 `packages/bundle/headless/src/index.ts` 约 72 行，是私有函数，保留最后一条非空 assistant 文本。本 spike 没有执行它。
+- 订阅是 `ctx.on('session/event')`。headless 在 `--json` 时走这个投影（`packages/bundle/headless/src/index.ts`）。这次没有跑那个进程。
 - 默认 logger：`vendor/cordis/src/logger.ts`。级别 `ERROR=0, INFO=1, WARN=2, DEBUG=3`，阈值默认 `INFO`。`targetLevel < level` 则丢弃，所以 **默认 buffer 不收 warn**。默认 exporter 只 `buffer.push`，不写 stderr。
 - app-boot 另装 exporter，`levels.default: 2`，把 warn/error 推进内存数组 `startupLogs`：`packages/boot/app-boot/src/index.ts` 约 985 行。仍然不是 stderr。headless JSON 模式把 stderr 留给 `dsh:` 诊断（`packages/bundle/headless/src/startup.ts`）。
 
-**结果。** `--json` 行里有 `visible answer` 的 `text` 和 `final`，没有 pause marker；marker 在 session log 里。`logger.warn` 不进 stderr，也不进默认 buffer；level 2 的内存 exporter 能看到它。显式 stderr 写能看到 `dsh: verifier paused …`。
+**结果。** `projectJsonRun` 的行里有 `visible answer` 的 `text`，没有 `final`，没有 pause marker；marker 在 session log 里。`logger.warn` 不进 stderr，也不进默认 buffer；level 2 的内存 exporter 能看到它。显式 stderr 写能看到 `dsh: verifier paused …`。
 
-**设计。** §9 第 4 条要改：暂停 notice **不会**出现在 `--json` stdout。`ctx.logger.warn` 也**不会**出现在 headless stderr。MVP 应自己 `process.stderr.write`，前缀用 `dsh:`。这是插件侧一行输出，不是 core 扩展。若还希望 JSON 消费者看到暂停，要在 core 的 `projectJsonRun` 增加事件类型；P1 不依赖这一点，stderr 已经能让人看见。
+**设计。** §9 第 4 条要改：暂停 notice **不会**出现在 `--json` stdout，因为 `projectJsonRun` 丢掉 `user/message`。`ctx.logger.warn` 也**不会**出现在 headless stderr。MVP 应自己 `process.stderr.write`，前缀用 `dsh:`。这是插件侧一行输出，不是 core 扩展。这条结论来自投影和 logger 的行为，不来自一次真实的 `dsh --json` 进程，也不来自 `summarize()`。若还希望 JSON 消费者看到暂停，要在 core 的 `projectJsonRun` 增加事件类型；P1 不依赖这一点，stderr 已经能让人看见。
 
 ## MVP / core
 
 P1 可以按现有扩展点开工：
 
 - notice：`agent/pre-step` 拼接，或空闲时 `session.append('user/message')`。
-- 费用：主循环读 `assistant/message.usage`；judge 旁路自己累加 `usage` chunk。当前模型用 `src/route.ts` 的折法。
-- judge 状态：`summarizeSession(session.snapshotEvents())`。
+- 费用：主循环的 `assistant/message.usage` 折进 `verifierLedger`（`stateOf`）。键是 provider + model，不含 `reasoningEffort`。入账含未缓存 input、output、cache-read、cache-write、reasoning。judge 旁路自己累加 `usage` chunk。当前模型用 `readCurrentRoute`。
+- judge 状态：`readJudgeDigest` → `stateOf(..., 'verifierJudge')`。空 assistant 行丢掉，工具行带工具名。
 - 计划被拒：`tools/post-execute` 返回 `additionalContexts`，listener 不要抛。
 - `/verifier`：命令 + `verifier` 投影；chip 调 `remote.commands.execute(sessionId, '/verifier on|off', [])`。
 - Jev：出站 HTTP；入站状态用 `connection.fetch.register`。
 - trace：`storageDomain.open` 的 JSON sidecar。
-- headless 暂停：stderr 手写一行，不要依赖 `--json` 或 `logger.warn`。
+- headless 暂停：stderr 手写一行 `dsh:`，不要依赖 `--json` 或 `logger.warn`。
 
-唯一「若产品改口径才要 core」的点：ACP 同一轮的模型封顶，需要公开 live selection。当前设计不做 ACP。
+ACP 同一轮换模型不在 MVP 范围内。这次没有实现它，spike 2 只保留了「只改私有 ref 会晚一轮」的记录。

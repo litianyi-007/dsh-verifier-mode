@@ -1,7 +1,8 @@
 /**
- * Spike 8. Headless `--json` is `projectJsonRun`. A pause notice is a
- * `user/message`, which that projector drops. `ctx.logger.warn` stays in the
- * in-memory logger buffer and does not reach stderr.
+ * Spike 8. `projectJsonRun` drops `user/message`. This test does not start
+ * the `dsh` CLI and does not call headless `summarize()` (that function is
+ * private). It also does not call `finish()`, so a `final` line is not evidence.
+ * `logger.warn` does not reach stderr. An explicit `dsh:` stderr write does.
  */
 import { describe, expect, it } from 'vitest'
 import { projectJsonRun } from '@deepseek-ai/dsh-headless/json-stream'
@@ -12,7 +13,7 @@ import { MockAdapter, textResponse } from './support/mock-adapter.ts'
 const PAUSE = 'P0-PAUSE-notice'
 
 describe('spike 8: headless json pause notice', () => {
-  it('omits the user notice from --json and does not print logger.warn on stderr', async () => {
+  it('omits the user notice from projectJsonRun and does not print logger.warn on stderr', async () => {
     const adapter = new MockAdapter([textResponse('visible answer')])
     const ctx = await mountLoop(adapter)
     ctx.on('agent/pre-step', async (_payload, next) => {
@@ -29,12 +30,11 @@ describe('spike 8: headless json pause notice', () => {
     const idle = waitForIdle(ctx, agent)
     send(agent, 'run')
     await idle
-    projection.finish('visible answer')
     projection.dispose()
 
     const events = lines.map(line => JSON.parse(line) as { type: string; text?: string })
     expect(events.some(event => event.type === 'text' && event.text === 'visible answer')).toBe(true)
-    expect(events.some(event => event.type === 'final' && event.text === 'visible answer')).toBe(true)
+    expect(events.some(event => event.type === 'final')).toBe(false)
     expect(lines.join('')).not.toContain(PAUSE)
     expect(JSON.stringify(agent.session.snapshotEvents())).toContain(PAUSE)
 

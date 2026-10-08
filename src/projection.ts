@@ -46,25 +46,34 @@ function wantedFromArgs(args: string | undefined): boolean | undefined {
   return undefined
 }
 
-export const verifierProjectionDefinition = {
-  key: 'verifier',
-  stateVersion: 1,
-  stateSchema,
-  init: () => ({ active: false, running: null }),
-  apply: (state, event) => {
-    if (event.type === 'command/run' && event.data.name === 'verifier') {
-      const wanted = wantedFromArgs(event.data.args)
-      if (wanted === undefined) return state
-      return { ...state, running: { commandId: event.data.commandId, wanted } }
-    }
-    if (event.type === 'command/done' && state.running !== null && event.data.commandId === state.running.commandId) {
-      if (event.data.kind !== 'success') return { ...state, running: null }
-      return { active: state.running.wanted, running: null }
-    }
-    return state
-  },
-  wire: {
-    viewSchema,
-    view: (state) => ({ active: state.active }),
-  },
-} satisfies ProjectionDefinition<'verifier', VerifierModeState>
+/**
+ * Build the verifier projection.
+ * `readEnabled` is read inside `init`, so `enabledByDefault` seeds `active`
+ * for each new session. A later successful `/verifier on|off` replaces it.
+ */
+export function createVerifierProjection(
+  readEnabled: () => boolean,
+): ProjectionDefinition<'verifier', VerifierModeState> {
+  return {
+    key: 'verifier',
+    stateVersion: 2,
+    stateSchema,
+    init: () => ({ active: readEnabled(), running: null }),
+    apply: (state, event) => {
+      if (event.type === 'command/run' && event.data.name === 'verifier') {
+        const wanted = wantedFromArgs(event.data.args)
+        if (wanted === undefined) return state
+        return { ...state, running: { commandId: event.data.commandId, wanted } }
+      }
+      if (event.type === 'command/done' && state.running !== null && event.data.commandId === state.running.commandId) {
+        if (event.data.kind !== 'success') return { ...state, running: null }
+        return { active: state.running.wanted, running: null }
+      }
+      return state
+    },
+    wire: {
+      viewSchema,
+      view: (state) => ({ active: state.active }),
+    },
+  }
+}

@@ -1,15 +1,19 @@
 /**
- * Minimal host plugin: config, `/verifier`, and the session projection.
- * P0 scaffold only — no judge, cost ledger, or Jev client.
+ * Minimal host plugin: config, `/verifier`, and the session projections.
+ * P0 scaffold only — no judge runner or Jev client.
  */
 import type { Context } from '@deepseek-ai/cordis'
+import { isVolatile } from '@deepseek-ai/cosmokit'
 import z from '@deepseek-ai/schemastery'
+import { ledgerProjectionDefinition } from './ledger.ts'
 import { verifierModeNotice } from './notices.ts'
-import { verifierProjectionDefinition } from './projection.ts'
+import { createVerifierProjection } from './projection.ts'
+import { routeProjectionDefinition } from './route.ts'
+import { judgeProjectionDefinition } from './summary.ts'
 
 /** Plugin-owned settings. Live values use schemastery `.volatile()`. */
 export interface Config {
-  /** Initial preference only. Model-visible mode is the logged `/verifier` command. */
+  /** Seeds `verifier.active` for a new session. A logged `/verifier` command replaces it. */
   enabledByDefault: boolean
 }
 
@@ -27,15 +31,26 @@ function parseMode(rawInput: string): 'on' | 'off' | 'status' | 'invalid' {
   return 'invalid'
 }
 
+/** Read the volatile flag at projection init, so each new session sees the current value. */
+function enabledNow(config: Config): boolean {
+  const flag: unknown = config.enabledByDefault
+  if (isVolatile(flag)) return flag.get() === true
+  return flag === true
+}
+
 /**
- * Register the projection and the `/verifier` command.
+ * Register the projections and the `/verifier` command.
  * The command appends a user-role notice and settles `command/done`.
- * The projection folds that pair, so a reloaded session restores `active`.
+ * The verifier projection folds that pair, so a reloaded session restores `active`.
  * @param ctx - plugin context. Requires `commands` and `sessionProjections`.
- * @param _config - validated plugin config. The volatile flag is not model-visible state.
+ * @param config - validated plugin config. `enabledByDefault` seeds the projection.
  */
-export function apply(ctx: Context, _config: Config = { enabledByDefault: false }): void {
-  ctx.sessionProjections.register(verifierProjectionDefinition)
+export function apply(ctx: Context, config: Config = { enabledByDefault: false }): void {
+  const readEnabled = () => enabledNow(config)
+  ctx.sessionProjections.register(createVerifierProjection(readEnabled))
+  ctx.sessionProjections.register(routeProjectionDefinition)
+  ctx.sessionProjections.register(ledgerProjectionDefinition)
+  ctx.sessionProjections.register(judgeProjectionDefinition)
   ctx.commands.register({
     name: 'verifier',
     description: 'Turn verifier mode on or off for this session',
@@ -61,8 +76,10 @@ export function apply(ctx: Context, _config: Config = { enabledByDefault: false 
 }
 
 export { verifierModeNotice, verifierNotice } from './notices.ts'
-export { verifierProjectionDefinition } from './projection.ts'
+export { createVerifierProjection } from './projection.ts'
 export type { VerifierModeState, VerifierModeView } from './projection.ts'
-export { currentRoute, currentRouteFromEvents } from './route.ts'
+export { currentRouteFromEvents, readCurrentRoute } from './route.ts'
 export type { CurrentRoute } from './route.ts'
-export { summarizeSession } from './summary.ts'
+export { readLedger, routeKey } from './ledger.ts'
+export type { LedgerState, UsageBill } from './ledger.ts'
+export { readJudgeDigest, summarizeSession } from './summary.ts'
