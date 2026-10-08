@@ -4,6 +4,7 @@
  */
 import { isVolatile } from '@deepseek-ai/cosmokit'
 import z from '@deepseek-ai/schemastery'
+import { TYPESAFE_API_KEY_REF } from './credential-ref.ts'
 import { DEFAULT_PRICING, FLASH_ROUTE, PRO_ROUTE } from './pricing.ts'
 import type { PricingTable } from './pricing.ts'
 
@@ -17,7 +18,7 @@ export interface ResolvedConfig {
   maxAuditRounds: number
   planReview: 'advise' | 'off'
   generatorRoute?: { provider: string; model: string }
-  jev: { baseUrl: string; apiKey: string; timeoutMs: number }
+  jev: { baseUrl: string; apiKey: string; apiKeyEnv: string; timeoutMs: number }
   thresholds: { violation: number; confidenceFloor: number; tieGap: number }
   weights: { addresses: number; grounded: number; verifiable: number; scope: number }
   cost: {
@@ -42,9 +43,21 @@ export const Config = z.object({
   }).default({ provider: '', model: '' }),
   jev: z.object({
     baseUrl: z.string().default('https://api.typesafe.ai'),
-    apiKey: z.string().default(''),
+    /**
+     * In-memory fallback for tests and an explicit process config.
+     * The Web UI does not write this leaf. `role('secret')` only redacts a
+     * settings response; it does not keep a value out of a profile patch,
+     * so the page stores the key through the credentials domain instead.
+     */
+    apiKey: z.string().role('secret').default('').volatile(),
+    apiKeyEnv: z.string().role('credential-ref').default(TYPESAFE_API_KEY_REF).volatile(),
     timeoutMs: z.number().default(10_000),
-  }).default({ baseUrl: 'https://api.typesafe.ai', apiKey: '', timeoutMs: 10_000 }),
+  }).default({
+    baseUrl: 'https://api.typesafe.ai',
+    apiKey: '',
+    apiKeyEnv: TYPESAFE_API_KEY_REF,
+    timeoutMs: 10_000,
+  }),
   thresholds: z.object({
     violation: z.number().default(0.5),
     confidenceFloor: z.number().default(0.6),
@@ -95,7 +108,7 @@ interface ConfigInput {
   maxAuditRounds?: unknown
   planReview?: unknown
   generatorRoute?: { provider?: string; model?: string }
-  jev?: { baseUrl?: string; apiKey?: string; timeoutMs?: number }
+  jev?: { baseUrl?: string; apiKey?: string; apiKeyEnv?: string; timeoutMs?: number }
   thresholds?: { violation?: number; confidenceFloor?: number; tieGap?: number }
   weights?: { addresses?: number; grounded?: number; verifiable?: number; scope?: number }
   cost?: { maxPerSession?: number; maxPerSessionByModel?: Record<string, number> }
@@ -121,6 +134,9 @@ export function resolveConfig(input: unknown): ResolvedConfig {
     jev: {
       baseUrl: raw.jev?.baseUrl || 'https://api.typesafe.ai',
       apiKey: raw.jev?.apiKey ?? '',
+      apiKeyEnv: typeof raw.jev?.apiKeyEnv === 'string' && raw.jev.apiKeyEnv !== ''
+        ? raw.jev.apiKeyEnv
+        : TYPESAFE_API_KEY_REF,
       timeoutMs: raw.jev?.timeoutMs ?? 10_000,
     },
     thresholds: {

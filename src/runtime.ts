@@ -13,6 +13,7 @@ import type { ResolvedConfig } from './config.ts'
 import { STRATEGIES, candidatePrompt, parseCandidate } from './candidates.ts'
 import type { ParsedCandidate } from './candidates.ts'
 import { addCostLine, ensureUsageStore, sessionKey, sessionSpendCny } from './cost-book.ts'
+import { resolveJevApiKey } from './jev-key.ts'
 import {
   INTAKE_QUESTIONS,
   auditQuestions,
@@ -55,11 +56,12 @@ const turnStrategy = new Map<string, string[]>()
 const DEFAULT_JEV_URL = 'https://api.typesafe.ai'
 
 /**
- * Score when the operator set a key, including on the schema's default URL.
+ * Score when a credential or an in-memory key is set, including on the schema's default URL.
  * An empty key on that URL stays fail-open so an unconfigured process does not call TypeSafe.
  */
-function judgeReady(config: ResolvedConfig): boolean {
-  if (config.jev.apiKey !== '') return true
+async function judgeReady(ctx: Context, config: ResolvedConfig): Promise<boolean> {
+  const key = await resolveJevApiKey(ctx, config)
+  if (key !== '') return true
   return config.jev.baseUrl !== DEFAULT_JEV_URL
 }
 
@@ -220,7 +222,7 @@ export async function runIntake(
     messages = [...messages, costResumeNotice(spent, cap.amount, cap.model)]
   }
   if (state?.approvedPlan) return { ...decision, messages }
-  if (!judgeReady(config)) {
+  if (!await judgeReady(ctx, config)) {
     pushTrace(sessionId, { point: 'intake', outcome: 'fallback', reason: 'jev is not configured' })
     return { ...decision, messages: [...messages, fallbackNotice('jev is not configured')] }
   }
@@ -248,7 +250,7 @@ export async function runIntake(
   try {
     scored = []
     for (const candidate of parsed) {
-      const response = await postJev(config.jev.baseUrl, config.jev.apiKey, {
+      const response = await postJev(config.jev.baseUrl, await resolveJevApiKey(ctx, config), {
         point: 'intake',
         state: { task, constraints: [], evidence, candidate },
         questions: INTAKE_QUESTIONS,
@@ -288,7 +290,7 @@ export async function runAudit(
   await ensureUsageStore(ctx)
   const state = ctx.sessionProjections.stateOf(agent.session, 'verifier')
   const effective = state?.active === true || state?.onceArmed === true
-  if (!effective || !config.audit || state?.paused === true || planActive(ctx, agent) || !judgeReady(config)) return
+  if (!effective || !config.audit || state?.paused === true || planActive(ctx, agent) || !await judgeReady(ctx, config)) return
   const sessionId = sessionKey(agent.session.id)
   const current = readCurrentRoute(ctx.sessionProjections, agent.session, agent.options)
   const cap = resolveCap(routeOf(current.provider, current.model), config.cost, config.pricing.aliases)
@@ -307,7 +309,7 @@ export async function runAudit(
   const evidence = delimitEvidence(task, freshNonce())
   let failed: string[] = []
   try {
-    const response = await postJev(config.jev.baseUrl, config.jev.apiKey, {
+    const response = await postJev(config.jev.baseUrl, await resolveJevApiKey(ctx, config), {
       point: 'audit',
       state: {
         task,
@@ -354,12 +356,12 @@ export async function scorePlan(
   await ensureUsageStore(ctx)
   const state = ctx.sessionProjections.stateOf(agent.session, 'verifier')
   const armed = state?.active === true || state?.onceArmed === true
-  if (!armed || config.planReview !== 'advise' || state?.paused === true || !judgeReady(config)) return
+  if (!armed || config.planReview !== 'advise' || state?.paused === true || !await judgeReady(ctx, config)) return
   const sessionId = sessionKey(agent.session.id)
   const task = clipTask(plan)
   const evidence = delimitEvidence(plan, freshNonce())
   try {
-    const response = await postJev(config.jev.baseUrl, config.jev.apiKey, {
+    const response = await postJev(config.jev.baseUrl, await resolveJevApiKey(ctx, config), {
       point: 'plan',
       state: { task, constraints: [], evidence, plan, candidate: { id: 'plan', title: 'submitted plan', steps: [plan], acceptance: [plan], risks: [] } },
       questions: INTAKE_QUESTIONS,

@@ -2,7 +2,7 @@
   "name": "dsh-verifier-mode",
   "version": "0.0.0",
   "private": true,
-  "description": "DeepSeek Harness verifier-mode plugin. P1 covers session switch, D1, D4, plan-mode advice, and a per-model CNY cap.",
+  "description": "DeepSeek Harness verifier-mode plugin. P1 covers session switch, D1, D4, plan-mode advice, and a per-model CNY cap. The TypeSafe key is set from the Plugins page and stored as a credential.",
   "type": "module",
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
@@ -35,6 +35,7 @@
     "@deepseek-ai/dsh-client-ui-renderer": ">=0.2.1-alpha.1 <0.3.0",
     "@deepseek-ai/dsh-client-ui-slots": ">=0.2.1-alpha.1 <0.3.0",
     "@deepseek-ai/dsh-commands": ">=0.2.1-alpha.1 <0.3.0",
+    "@deepseek-ai/dsh-credentials": ">=0.2.1-alpha.1 <0.3.0",
     "@deepseek-ai/dsh-headless": ">=0.2.1-alpha.1 <0.3.0",
     "@deepseek-ai/dsh-llm": ">=0.2.1-alpha.1 <0.3.0",
     "@deepseek-ai/dsh-plan-mode": ">=0.2.1-alpha.1 <0.3.0",

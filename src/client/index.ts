@@ -7,13 +7,17 @@ import { createElement } from 'react'
 import type { ReactNode } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import { TYPESAFE_ROW_CONFIG_KEY } from '../credential-ref.ts'
+import { TypeSafeKeyController, VerifierKeyPage } from './key-form.ts'
+import type { CredentialsClient } from './key-form.ts'
 import { en, zh } from './locales.ts'
+import type { VerifierLocaleKey } from './locales.ts'
 
 /**
  * Service names the client body reads. `package.json` `dsh.client.inject`
  * lists package names; DSH client source uses these service names.
  */
-export const inject = ['slots', 'locale', 'remote', 'remote.commands']
+export const inject = ['slots', 'locale', 'remote', 'remote.commands', 'remote.credentials']
 
 /** Dictionary namespace owned by this plugin. */
 export const VERIFIER_LOCALE_NS = 'verifier'
@@ -23,7 +27,7 @@ export const VERIFIER_CHIP_ID = 'dsh-verifier-mode'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
-    verifier: 'chip.label' | 'chip.on.aria' | 'chip.off.aria' | 'chip.title' | 'chip.paused'
+    verifier: VerifierLocaleKey
   }
 }
 
@@ -43,7 +47,7 @@ export interface VerifierChipInjected {
 }
 
 export interface VerifierChipProps {
-  t: (key: 'chip.label' | 'chip.on.aria' | 'chip.off.aria' | 'chip.title' | 'chip.paused') => string
+  t: (key: VerifierLocaleKey) => string
   toggle: (active: boolean) => Promise<string | null>
   /** Folded host view, when the renderer supplies `useProjection`. */
   useProjection?: (key: 'verifier') => { active: boolean; paused?: boolean } | undefined
@@ -129,17 +133,53 @@ export function registerVerifierChip(
   }, VerifierChip)
 }
 
+interface KeySlotRegister {
+  register(options: {
+    name: 'plugins.row.config'
+    key: string
+    locale: typeof VERIFIER_LOCALE_NS
+    inject: () => ReturnType<TypeSafeKeyController['face']>
+  }, component: typeof VerifierKeyPage): () => void
+}
+
 interface ClientHost {
   locale: LocaleBind
-  slots: SlotRegister & {
-    inject(key: 'conversation.input.left', callback: () => (() => void)): () => void
+  slots: SlotRegister & KeySlotRegister & {
+    inject(key: 'conversation.input.left' | 'plugins.row.config', callback: () => (() => void)): () => void
   }
-  remote: { commands: CommandsExecute }
+  remote: {
+    commands: CommandsExecute
+    credentials: CredentialsClient
+    $on?: (event: 'credentials/reference-updated', listener: (ref: string) => void) => () => void
+  }
+}
+
+/**
+ * Register the TypeSafe key page on the verifier row.
+ * The slot key is `dsh-verifier-mode#dsh-verifier-mode`.
+ * @returns the registration disposer.
+ */
+export function registerTypeSafeKey(ctx: Context & ClientHost): () => void {
+  const controller = new TypeSafeKeyController(ctx.remote.credentials)
+  const disposeWatch = ctx.remote.$on?.('credentials/reference-updated', (ref) => {
+    controller.refreshReference(ref)
+  })
+  const disposeSlot = (ctx.slots as KeySlotRegister).register({
+    name: 'plugins.row.config',
+    key: TYPESAFE_ROW_CONFIG_KEY,
+    locale: VERIFIER_LOCALE_NS,
+    inject: () => controller.face(),
+  }, VerifierKeyPage)
+  return () => {
+    disposeWatch?.()
+    disposeSlot()
+  }
 }
 
 /**
  * Client plugin body. Dictionaries are registered here; the chip waits until
- * the conversation shell declares `conversation.input.left`.
+ * the conversation shell declares `conversation.input.left`, and the key page
+ * waits until the Plugins page declares `plugins.row.config`.
  */
 export function apply(ctx: Context & ClientHost): void {
   ctx.effect(() => ctx.locale.register(VERIFIER_LOCALE_NS, { zh, en }), 'dsh-verifier-mode: dictionaries')
@@ -148,4 +188,5 @@ export function apply(ctx: Context & ClientHost): void {
     ctx.locale,
     (sessionId, line, attachments) => ctx.remote.commands.execute(sessionId, line, attachments),
   ))
+  ctx.slots.inject('plugins.row.config', () => registerTypeSafeKey(ctx))
 }
