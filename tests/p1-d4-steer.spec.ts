@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest'
 import { createAgent, logJson, send, waitForIdle } from '../spikes/support/harness.ts'
 import { MockAdapter, textResponse } from '../spikes/support/mock-adapter.ts'
-import { json, passingAnswers, startJev } from './support/jev.ts'
+import { callKind, json, passingAnswers, startJev } from './support/jev.ts'
 import { mountVerifier, verifierConfig } from './support/mount.ts'
 
 function candidate(title: string): ReturnType<typeof textResponse> {
@@ -17,8 +17,7 @@ function candidate(title: string): ReturnType<typeof textResponse> {
 describe('P1 D4 audit', () => {
   it('steers once when the audit fails and does not steer again', async () => {
     const jev = await startJev((body, response) => {
-      const point = (body as { point?: string }).point
-      if (point === 'audit') {
+      if (callKind(body) === 'audit') {
         json(response, 200, {
           usage: { inputTokens: 15, outputTokens: 0 },
           answers: { ...passingAnswers(), criterion_met_0: { value: 0.95, confidence: 0.9 }, unverified_claims: { value: 0.9, confidence: 0.9 } },
@@ -46,7 +45,7 @@ describe('P1 D4 audit', () => {
       expect(adapter.requests).toHaveLength(5)
       expect(JSON.stringify(adapter.requests[4]?.messages)).toContain('[verifier audit] unmet:')
       expect(logJson(agent)).toContain('[verifier incomplete]')
-      expect(jev.bodies.filter(body => (body as { point?: string }).point === 'audit')).toHaveLength(2)
+      expect(jev.bodies.filter(body => callKind(body) === 'audit')).toHaveLength(2)
     } finally {
       await jev.close()
     }

@@ -36,6 +36,23 @@ export async function startJev(handler: (body: Record<string, unknown>, response
   }
 }
 
+/**
+ * Which decision a System One body is. `point` is not on the wire.
+ * Audit is recognized by its question ids. A plan reuses the intake questions
+ * and also carries `state.plan`.
+ */
+export function callKind(body: unknown): 'intake' | 'audit' | 'plan' | 'other' {
+  if (body === null || typeof body !== 'object') return 'other'
+  const record = body as { state?: { plan?: unknown }; questions?: unknown }
+  const questions = record.questions
+  if (questions === null || typeof questions !== 'object' || Array.isArray(questions)) return 'other'
+  const keys = questions as Record<string, unknown>
+  if ('unverified_claims' in keys || 'claims_supported_by_evidence' in keys) return 'audit'
+  if ('addresses_request' in keys && typeof record.state?.plan === 'string') return 'plan'
+  if ('addresses_request' in keys) return 'intake'
+  return 'other'
+}
+
 export function json(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { 'content-type': 'application/json' })
   response.end(JSON.stringify(body))
