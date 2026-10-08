@@ -12,7 +12,7 @@ import { costClock } from './clock.ts'
 import type { ResolvedConfig } from './config.ts'
 import { STRATEGIES, candidatePrompt, parseCandidate } from './candidates.ts'
 import type { ParsedCandidate } from './candidates.ts'
-import { addCostLine, sessionKey, sessionSpendCny } from './cost-book.ts'
+import { addCostLine, ensureUsageStore, sessionKey, sessionSpendCny } from './cost-book.ts'
 import {
   INTAKE_QUESTIONS,
   auditQuestions,
@@ -52,8 +52,15 @@ const steers = new Map<string, number>()
 const planNotes = new Map<string, UserMessage>()
 const turnStrategy = new Map<string, string[]>()
 
+const DEFAULT_JEV_URL = 'https://api.typesafe.ai'
+
+/**
+ * Score when the operator set a key, including on the schema's default URL.
+ * An empty key on that URL stays fail-open so an unconfigured process does not call TypeSafe.
+ */
 function judgeReady(config: ResolvedConfig): boolean {
-  return config.jev.baseUrl !== 'https://api.typesafe.ai'
+  if (config.jev.apiKey !== '') return true
+  return config.jev.baseUrl !== DEFAULT_JEV_URL
 }
 
 function planActive(ctx: Context, agent: Agent): boolean {
@@ -73,14 +80,17 @@ function intakeRules(config: ResolvedConfig): SelectionRules {
     weights: config.weights,
     noulKeys: INTAKE_QUESTIONS.filter(question => question.kind === 'noul').map(question => question.key),
     scoreKeys: INTAKE_QUESTIONS.filter(question => question.kind === 'score').map(question => question.key),
+    scoreLevels: Object.fromEntries(INTAKE_QUESTIONS.flatMap(question => (
+      question.kind === 'score' && question.levels !== undefined ? [[question.key, question.levels]] : []
+    ))),
   }
 }
 
-function billJev(sessionId: string, response: JevResponse): void {
+async function billJev(sessionId: string, response: JevResponse): Promise<void> {
   const inputTokens = response.usage?.inputTokens ?? 0
   const outputTokens = response.usage?.outputTokens ?? 0
   const priced = priceJev(inputTokens, outputTokens)
-  addCostLine(sessionId, {
+  await addCostLine(sessionId, {
     source: 'jev',
     model: 'jev',
     amountCny: priced.amountCny,
@@ -144,7 +154,7 @@ async function generateOne(
     if (chunk.type === 'usage' && chunk.usage && !billed) {
       billed = true
       const priced = priceUsage(routeOf(provider, model), chunk.usage, costClock.now(), config.pricing)
-      addCostLine(sessionId, {
+      await addCostLine(sessionId, {
         source: 'generator',
         model: routeOf(provider, model),
         amountCny: priced.amountCny,
@@ -186,6 +196,7 @@ export async function runIntake(
   signal: AbortSignal,
   decision: EnterDecision,
 ): Promise<EnterDecision> {
+  await ensureUsageStore(ctx)
   const state = ctx.sessionProjections.stateOf(agent.session, 'verifier')
   const effective = state?.active === true || state?.onceArmed === true
   if (!effective || !config.intake) return decision
@@ -242,7 +253,7 @@ export async function runIntake(
         state: { task, constraints: [], evidence, candidate },
         questions: INTAKE_QUESTIONS,
       }, signal, config.jev.timeoutMs)
-      billJev(sessionId, response)
+      await billJev(sessionId, response)
       if (sessionSpendCny(sessionId) >= cap.amount) {
         return { ...decision, messages: pause(sessionId, sessionSpendCny(sessionId), cap, messages, false) }
       }
@@ -274,6 +285,7 @@ export async function runAudit(
   turn: number,
   signal: AbortSignal,
 ): Promise<void> {
+  await ensureUsageStore(ctx)
   const state = ctx.sessionProjections.stateOf(agent.session, 'verifier')
   const effective = state?.active === true || state?.onceArmed === true
   if (!effective || !config.audit || state?.paused === true || planActive(ctx, agent) || !judgeReady(config)) return
@@ -306,7 +318,7 @@ export async function runAudit(
       },
       questions: auditQuestions(acceptance),
     }, signal, config.jev.timeoutMs)
-    billJev(sessionId, response)
+    await billJev(sessionId, response)
     failed = auditQuestions(acceptance).flatMap((question) => {
       if (question.kind !== 'noul') return []
       const answer = response.answers[question.key]
@@ -339,8 +351,10 @@ export async function scorePlan(
   plan: string,
   signal: AbortSignal,
 ): Promise<void> {
+  await ensureUsageStore(ctx)
   const state = ctx.sessionProjections.stateOf(agent.session, 'verifier')
-  if (state?.active !== true || config.planReview !== 'advise' || state.paused === true || !judgeReady(config)) return
+  const armed = state?.active === true || state?.onceArmed === true
+  if (!armed || config.planReview !== 'advise' || state?.paused === true || !judgeReady(config)) return
   const sessionId = sessionKey(agent.session.id)
   const task = clipTask(plan)
   const evidence = delimitEvidence(plan, freshNonce())
@@ -350,7 +364,7 @@ export async function scorePlan(
       state: { task, constraints: [], evidence, plan, candidate: { id: 'plan', title: 'submitted plan', steps: [plan], acceptance: [plan], risks: [] } },
       questions: INTAKE_QUESTIONS,
     }, signal, config.jev.timeoutMs)
-    billJev(sessionId, response)
+    await billJev(sessionId, response)
     const selected = selectWinner([{
       candidate: { id: 'plan', title: 'submitted plan', steps: [plan], acceptance: [plan], risks: [] },
       answers: response.answers,
@@ -373,7 +387,7 @@ export function takePlanNote(callId: string): UserMessage | undefined {
   return note
 }
 
-export function billAssistantUsage(
+export async function billAssistantUsage(
   sessionId: string,
   provider: string,
   model: string,
@@ -381,7 +395,7 @@ export function billAssistantUsage(
   table: ResolvedConfig['pricing'],
 ): void {
   const priced = priceUsage(routeOf(provider, model), usage, costClock.now(), table)
-  addCostLine(sessionId, {
+  await addCostLine(sessionId, {
     source: 'main',
     model: routeOf(provider, model),
     amountCny: priced.amountCny,

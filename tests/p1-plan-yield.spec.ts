@@ -69,6 +69,31 @@ describe('P1 plan-mode yield', () => {
     }
   })
 
+  it('scores a plan submitted during /verifier once', async () => {
+    const jev = await startJev((body, response) => {
+      json(response, 200, { usage: { inputTokens: 12, outputTokens: 0 }, answers: passingAnswers() })
+    })
+    try {
+      const adapter = new MockAdapter([
+        toolCallResponse('call-once-plan', 'exit_plan_mode', { plan: PLAN }),
+        textResponse('carried out the one turn'),
+      ])
+      const ctx = await mountPlan(adapter, jev.url, 'Approve')
+      const agent = await createAgent(ctx, 'p1-plan-once')
+      await ctx.commands.execute(agent, '/verifier once', [], new AbortController().signal)
+      await ctx.commands.execute(agent, '/plan', [], new AbortController().signal)
+      const idle = waitForIdle(ctx, agent)
+      send(agent, 'present the plan once')
+      await idle
+
+      expect(ctx.sessionProjections.stateOf(agent.session, 'verifier')?.active).toBe(false)
+      expect(JSON.stringify(adapter.requests[1]?.messages)).toContain('[verifier plan-score]')
+      expect(jev.bodies.some(body => (body as { point?: string }).point === 'plan')).toBe(true)
+    } finally {
+      await jev.close()
+    }
+  })
+
   it('skips D4 while plan mode stays active', async () => {
     const jev = await startJev((body, response) => {
       json(response, 200, { usage: { inputTokens: 12, outputTokens: 0 }, answers: passingAnswers() })

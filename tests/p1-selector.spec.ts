@@ -9,6 +9,12 @@ const rules: SelectionRules = {
   weights: { addresses: 0.35, grounded: 0.25, verifiable: 0.25, scope: 0.15 },
   noulKeys: ['violates_constraint_0', 'irreversible_without_approval'],
   scoreKeys: ['addresses_request', 'grounded_in_evidence', 'verifiable', 'scope_risk'],
+  scoreLevels: {
+    addresses_request: 5,
+    grounded_in_evidence: 4,
+    verifiable: 4,
+    scope_risk: 4,
+  },
 }
 
 function candidate(id: string, addresses: number, scope: number): ScoredCandidate {
@@ -30,6 +36,22 @@ describe('P1 selector', () => {
     const selected = selectWinner([
       candidate('broad', 4, 0),
       candidate('local', 2, 3),
+    ], rules)
+    expect(selected.kind).toBe('winner')
+    if (selected.kind === 'winner') expect(selected.candidate.id).toBe('local')
+  })
+
+  it('keeps the tie break when the response omits levels', () => {
+    const strip = (scored: ScoredCandidate): ScoredCandidate => ({
+      ...scored,
+      answers: Object.fromEntries(Object.entries(scored.answers).map(([key, answer]) => {
+        const { levels: _levels, ...rest } = answer
+        return [key, rest]
+      })),
+    })
+    const selected = selectWinner([
+      strip(candidate('broad', 4, 0)),
+      strip(candidate('local', 2, 3)),
     ], rules)
     expect(selected.kind).toBe('winner')
     if (selected.kind === 'winner') expect(selected.candidate.id).toBe('local')

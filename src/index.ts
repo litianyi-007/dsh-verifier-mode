@@ -9,7 +9,7 @@ import { fallbackNotice, verifierModeNotice } from './notices.ts'
 import { createVerifierProjection } from './projection.ts'
 import { routeProjectionDefinition } from './route.ts'
 import { billAssistantUsage, runAudit, runIntake, scorePlan, takePlanNote } from './runtime.ts'
-import { sessionKey } from './cost-book.ts'
+import { ensureUsageStore, sessionKey, watchUsageStore } from './cost-book.ts'
 import { judgeProjectionDefinition } from './summary.ts'
 
 export { Config }
@@ -27,11 +27,13 @@ function parseMode(rawInput: string): 'on' | 'off' | 'status' | 'once' | 'invali
 
 /**
  * Register projections, `/verifier`, and the decision listeners.
- * @param ctx - requires `commands` and `sessionProjections`. `planMode` is optional.
+ * @param ctx - requires `commands` and `sessionProjections`. `planMode` and `storageDomain` are optional.
  * @param config - validated plugin config. `enabledByDefault` seeds the projection.
  */
-export function apply(ctx: Context, config: unknown = { enabledByDefault: false }): void {
+export async function apply(ctx: Context, config: unknown = { enabledByDefault: false }): Promise<void> {
   const readConfig = () => resolveConfig(config)
+  await ensureUsageStore(ctx)
+  watchUsageStore(ctx)
   ctx.sessionProjections.register(createVerifierProjection(() => readConfig().enabledByDefault))
   ctx.sessionProjections.register(routeProjectionDefinition)
   ctx.sessionProjections.register(ledgerProjectionDefinition)
@@ -41,7 +43,10 @@ export function apply(ctx: Context, config: unknown = { enabledByDefault: false 
     if (event.type !== 'assistant/message' || event.data.usage === undefined) return
     const usage = event.data.usage as TokenUsage
     const source = event.data.message.source
-    billAssistantUsage(sessionKey(session.id), source.provider, source.model, usage, readConfig().pricing)
+    void billAssistantUsage(sessionKey(session.id), source.provider, source.model, usage, readConfig().pricing).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : 'unknown'
+      process.stderr.write(`dsh: verifier cost ledger write failed: ${message}\n`)
+    })
   })
 
   ctx.on('agent/pre-step', async (payload, next) => {

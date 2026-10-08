@@ -31,6 +31,11 @@ export interface SelectionRules {
   /** Question keys asked for this decision. Missing answers disqualify the candidate. */
   noulKeys: string[]
   scoreKeys: string[]
+  /**
+   * Levels declared on the question. A score index is `value / (levels - 1)`.
+   * The response does not have to copy `levels`.
+   */
+  scoreLevels: Record<string, number>
 }
 
 export interface SelectionWinner {
@@ -52,9 +57,9 @@ const SCORE_WEIGHT: Record<string, keyof SelectionRules['weights']> = {
   scope_risk: 'scope',
 }
 
-function unit(answer: ScoreAnswer): number {
-  if (answer.levels !== undefined && answer.levels > 1) return answer.value / (answer.levels - 1)
-  return answer.value
+function unit(value: number, levels: number | undefined): number {
+  if (levels !== undefined && levels > 1) return value / (levels - 1)
+  return value
 }
 
 export function scoreCandidate(
@@ -76,7 +81,7 @@ export function scoreCandidate(
     if (answer === undefined) return { eligible: false, composite: 0, confidence: 0, scope: 0, reason: `missing ${key}` }
     const weightKey = SCORE_WEIGHT[key]
     const weight = weightKey === undefined ? 0 : rules.weights[weightKey]
-    const normalized = unit(answer)
+    const normalized = unit(answer.value, rules.scoreLevels[key])
     composite += weight * normalized
     confidence = Math.min(confidence, answer.confidence)
     if (key === 'scope_risk') scope = normalized
