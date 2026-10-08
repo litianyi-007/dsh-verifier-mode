@@ -44,7 +44,7 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
-    include: ['spikes/**/*.spec.ts'],
+    include: ['spikes/**/*.spec.ts', 'tests/**/*.spec.ts'],
     fileParallelism: false,
     testTimeout: 30_000,
     hookTimeout: 30_000,

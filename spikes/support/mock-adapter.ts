@@ -4,7 +4,7 @@
  * public export, and this package does not import the DSH test tree.
  */
 import type { GenerateOptions, LlmResolvedModelInfo, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
-import { LlmAdapter, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, ReasoningEffortId, ToolCallId } from '@deepseek-ai/dsh-llm'
 
 export function textResponse(text: string, usage?: Partial<TokenUsage>): StreamChunk[] {
   return [
@@ -41,7 +41,18 @@ export class MockAdapter extends LlmAdapter {
   }
 
   override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    return Promise.resolve({ provider, id: model, name: model })
+    return Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      reasoning: {
+        efforts: [
+          { id: ReasoningEffortId('low'), name: 'low' },
+          { id: ReasoningEffortId('medium'), name: 'medium' },
+          { id: ReasoningEffortId('high'), name: 'high' },
+        ],
+      },
+    })
   }
 
   async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
