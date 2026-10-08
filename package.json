@@ -2,7 +2,7 @@
   "name": "dsh-verifier-mode",
   "version": "0.0.0",
   "private": true,
-  "description": "P0 spikes for a DeepSeek Harness verifier-mode plugin. Not the MVP.",
+  "description": "DeepSeek Harness verifier-mode plugin. P1 covers session switch, D1, D4, plan-mode advice, and a per-model CNY cap.",
   "type": "module",
   "engines": {
     "node": "^22.19.0 || >=24.0.0"

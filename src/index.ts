@@ -1,68 +1,116 @@
 /**
- * Minimal host plugin: config, `/verifier`, and the session projections.
- * P0 scaffold only — no judge runner or Jev client.
+ * Verifier mode: session switch, D1 strategy selection, D4 audit, plan advice, CNY cap.
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { isVolatile } from '@deepseek-ai/cosmokit'
-import z from '@deepseek-ai/schemastery'
+import type { TokenUsage } from '@deepseek-ai/dsh-llm'
+import { Config, resolveConfig } from './config.ts'
 import { ledgerProjectionDefinition } from './ledger.ts'
-import { verifierModeNotice } from './notices.ts'
+import { fallbackNotice, verifierModeNotice } from './notices.ts'
 import { createVerifierProjection } from './projection.ts'
 import { routeProjectionDefinition } from './route.ts'
+import { billAssistantUsage, runAudit, runIntake, scorePlan, takePlanNote } from './runtime.ts'
+import { ensureUsageStore, sessionKey, watchUsageStore } from './cost-book.ts'
 import { judgeProjectionDefinition } from './summary.ts'
 
-/** Plugin-owned settings. Live values use schemastery `.volatile()`. */
-export interface Config {
-  /** Seeds `verifier.active` for a new session. A logged `/verifier` command replaces it. */
-  enabledByDefault: boolean
-}
-
-export const Config: z<Config> = z.object({
-  enabledByDefault: z.boolean().default(false).volatile(),
-})
+export { Config }
 
 export const name = 'dsh-verifier-mode'
-export const inject = ['commands', 'sessionProjections']
+export const inject = ['commands', 'sessionProjections', 'llm']
 
-function parseMode(rawInput: string): 'on' | 'off' | 'status' | 'invalid' {
+function parseMode(rawInput: string): 'on' | 'off' | 'status' | 'once' | 'invalid' {
   const arg = rawInput.trim()
   if (arg === '' || arg === 'status') return 'status'
   if (arg === 'on' || arg === 'off') return arg
+  if (arg === 'once' || arg.startsWith('once ')) return 'once'
   return 'invalid'
 }
 
-/** Read the volatile flag at projection init, so each new session sees the current value. */
-function enabledNow(config: Config): boolean {
-  const flag: unknown = config.enabledByDefault
-  if (isVolatile(flag)) return flag.get() === true
-  return flag === true
-}
-
 /**
- * Register the projections and the `/verifier` command.
- * The command appends a user-role notice and settles `command/done`.
- * The verifier projection folds that pair, so a reloaded session restores `active`.
- * @param ctx - plugin context. Requires `commands` and `sessionProjections`.
+ * Register projections, `/verifier`, and the decision listeners.
+ * @param ctx - requires `commands` and `sessionProjections`. `planMode` and `storageDomain` are optional.
  * @param config - validated plugin config. `enabledByDefault` seeds the projection.
  */
-export function apply(ctx: Context, config: Config = { enabledByDefault: false }): void {
-  const readEnabled = () => enabledNow(config)
-  ctx.sessionProjections.register(createVerifierProjection(readEnabled))
+export async function apply(ctx: Context, config: unknown = { enabledByDefault: false }): Promise<void> {
+  const readConfig = () => resolveConfig(config)
+  await ensureUsageStore(ctx)
+  watchUsageStore(ctx)
+  ctx.sessionProjections.register(createVerifierProjection(() => readConfig().enabledByDefault))
   ctx.sessionProjections.register(routeProjectionDefinition)
   ctx.sessionProjections.register(ledgerProjectionDefinition)
   ctx.sessionProjections.register(judgeProjectionDefinition)
+
+  ctx.on('session/event', (session, event) => {
+    if (event.type !== 'assistant/message' || event.data.usage === undefined) return
+    const usage = event.data.usage as TokenUsage
+    const source = event.data.message.source
+    void billAssistantUsage(sessionKey(session.id), source.provider, source.model, usage, readConfig().pricing).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : 'unknown'
+      process.stderr.write(`dsh: verifier cost ledger write failed: ${message}\n`)
+    })
+  })
+
+  ctx.on('agent/pre-step', async (payload, next) => {
+    const decision = await next()
+    if (decision.kind !== 'enter' || payload.step !== 1) return decision
+    try {
+      return await runIntake(ctx, readConfig(), payload.agent, payload.turn, payload.signal, decision)
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'intake failed'
+      return { ...decision, messages: [...decision.messages, fallbackNotice(reason)] }
+    }
+  })
+
+  ctx.on('agent/turn-stopping', async (payload) => {
+    try {
+      await runAudit(ctx, readConfig(), payload.agent, payload.turn, payload.signal)
+    } catch {
+      // Judge failures leave the turn on the normal path.
+    }
+  })
+
+  ctx.on('tools/pre-execute', async (exec, next) => {
+    const decision = await next()
+    if (exec.name !== 'exit_plan_mode' || exec.agent === undefined) return decision
+    const plan = typeof exec.arguments === 'object' && exec.arguments !== null && 'plan' in exec.arguments
+      && typeof exec.arguments.plan === 'string'
+      ? exec.arguments.plan
+      : ''
+    try {
+      await scorePlan(ctx, readConfig(), exec.agent, String(exec.callId), plan, exec.signal)
+    } catch {
+      // Advice is optional. The tool decision is unchanged.
+    }
+    return decision
+  })
+
+  ctx.on('tools/post-execute', async (exec, _result, next) => {
+    const decision = await next()
+    if (exec.name !== 'exit_plan_mode') return decision
+    const note = takePlanNote(String(exec.callId))
+    if (note === undefined || (decision.kind !== 'accept' && decision.kind !== 'block')) return decision
+    return { ...decision, additionalContexts: [...(decision.additionalContexts ?? []), note] }
+  })
+
   ctx.commands.register({
     name: 'verifier',
-    description: 'Turn verifier mode on or off for this session',
-    input: { hint: 'on|off|status' },
+    description: 'Turn verifier mode on or off for this session, or arm it for one turn',
+    input: { hint: 'on|off|status|once' },
     handler: ({ agent, rawInput }) => {
-      const current = ctx.sessionProjections.stateOf(agent.session, 'verifier')?.active ?? false
+      const state = ctx.sessionProjections.stateOf(agent.session, 'verifier')
       const mode = parseMode(rawInput)
       if (mode === 'invalid') {
-        return { kind: 'error' as const, text: `unknown /verifier argument "${rawInput.trim()}" (expected on, off, or status)` }
+        return { kind: 'error' as const, text: `unknown /verifier argument "${rawInput.trim()}" (expected on, off, status, or once)` }
       }
       if (mode === 'status') {
-        return { kind: 'success' as const, text: current ? 'Verifier mode is on.' : 'Verifier mode is off.' }
+        const bits = [
+          state?.active ? 'Verifier mode is on.' : 'Verifier mode is off.',
+          state?.onceArmed ? 'Armed for the next turn.' : '',
+          state?.paused ? 'Paused at the cost cap.' : '',
+        ].filter(bit => bit !== '')
+        return { kind: 'success' as const, text: bits.join(' ') }
+      }
+      if (mode === 'once') {
+        return { kind: 'success' as const, text: 'Verifier will run for the next turn.' }
       }
       const active = mode === 'on'
       const event = agent.session.append('user/message', verifierModeNotice(active), { surfaceOp: 'append' })
@@ -83,3 +131,8 @@ export type { CurrentRoute } from './route.ts'
 export { readLedger, routeKey } from './ledger.ts'
 export type { LedgerState, UsageBill } from './ledger.ts'
 export { readJudgeDigest, summarizeSession } from './summary.ts'
+export { readVerifierTraces } from './trace.ts'
+export { sessionSpendCny } from './cost-book.ts'
+export { resolveCap, priceUsage, priceJev, isPeak, DEFAULT_PRICING, FLASH_ROUTE, PRO_ROUTE } from './pricing.ts'
+export { costClock } from './clock.ts'
+export { resolveConfig } from './config.ts'

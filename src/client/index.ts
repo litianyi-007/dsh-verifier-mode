@@ -23,7 +23,7 @@ export const VERIFIER_CHIP_ID = 'dsh-verifier-mode'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
-    verifier: 'chip.label' | 'chip.on.aria' | 'chip.off.aria' | 'chip.title'
+    verifier: 'chip.label' | 'chip.on.aria' | 'chip.off.aria' | 'chip.title' | 'chip.paused'
   }
 }
 
@@ -43,11 +43,12 @@ export interface VerifierChipInjected {
 }
 
 export interface VerifierChipProps {
-  t: (key: 'chip.label' | 'chip.on.aria' | 'chip.off.aria' | 'chip.title') => string
+  t: (key: 'chip.label' | 'chip.on.aria' | 'chip.off.aria' | 'chip.title' | 'chip.paused') => string
   toggle: (active: boolean) => Promise<string | null>
   /** Folded host view, when the renderer supplies `useProjection`. */
-  useProjection?: (key: 'verifier') => { active: boolean } | undefined
+  useProjection?: (key: 'verifier') => { active: boolean; paused?: boolean } | undefined
   active?: boolean
+  paused?: boolean
 }
 
 /** Client command service the chip calls. Session id first, then the slash line. */
@@ -78,15 +79,17 @@ export async function executeVerifierMode(
 export function VerifierChip(props: VerifierChipProps): ReactNode {
   const projected = props.useProjection?.('verifier')
   const active = projected?.active ?? props.active ?? false
+  const paused = projected?.paused ?? props.paused ?? false
+  const label = paused ? `${props.t('chip.label')} · ${props.t('chip.paused')}` : props.t('chip.label')
   return createElement(
     'button',
     {
       type: 'button',
       'aria-label': props.t(active ? 'chip.on.aria' : 'chip.off.aria'),
-      title: props.t('chip.title'),
+      title: props.t(paused ? 'chip.paused' : 'chip.title'),
       onClick: () => { void props.toggle(!active) },
     },
-    props.t('chip.label'),
+    label,
   )
 }
 
