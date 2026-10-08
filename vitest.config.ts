@@ -24,6 +24,11 @@ export default defineConfig({
   resolve: {
     alias: [
       {
+        // Longer than `@deepseek-ai/dsh-credentials`, which is a prefix alias.
+        find: /^@deepseek-ai\/dsh-credentials-local$/,
+        replacement: `${DSH}/packages/credentials/credentials-local/src/index.ts`,
+      },
+      {
         find: '@deepseek-ai/dsh-client-locale/client',
         replacement: `${DSH}/packages/client/locale/src/client/index.ts`,
       },
