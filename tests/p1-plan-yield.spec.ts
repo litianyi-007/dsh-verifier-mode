@@ -10,7 +10,7 @@ import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import { createAgent, logJson, mountLoop, send, waitForIdle } from '../spikes/support/harness.ts'
 import { MockAdapter, textResponse, toolCallResponse } from '../spikes/support/mock-adapter.ts'
 import * as plugin from '../src/index.ts'
-import { json, passingAnswers, startJev } from './support/jev.ts'
+import { callKind, json, passingAnswers, startJev } from './support/jev.ts'
 import { verifierConfig } from './support/mount.ts'
 
 const PLAN = '# Ship\n\nWrite the regression test, then fix the parser.'
@@ -52,18 +52,18 @@ describe('P1 plan-mode yield', () => {
       expect(JSON.stringify(adapter.requests[1]?.messages)).toContain('[verifier plan-score]')
       expect(logJson(agent)).toContain('Plan approved')
       expect(ctx.sessionProjections.stateOf(agent.session, 'verifier')?.approvedPlan).toBe(PLAN)
-      const audit = jev.bodies.filter(body => (body as { point?: string }).point === 'audit')
+      const audit = jev.bodies.filter(body => callKind(body) === 'audit')
       expect(audit).toHaveLength(1)
       expect(JSON.stringify(audit[0])).toContain('# Ship')
-      expect(jev.bodies.some(body => (body as { point?: string }).point === 'intake')).toBe(false)
+      expect(jev.bodies.some(body => callKind(body) === 'intake')).toBe(false)
 
       const second = waitForIdle(ctx, agent)
       send(agent, 'continue the approved plan')
       await second
       expect(adapter.requests).toHaveLength(3)
       expect(adapter.requests[2]?.reasoningEffort).toBeUndefined()
-      expect(jev.bodies.filter(body => (body as { point?: string }).point === 'intake')).toHaveLength(0)
-      expect(JSON.stringify(jev.bodies.filter(body => (body as { point?: string }).point === 'audit').at(-1))).toContain('# Ship')
+      expect(jev.bodies.filter(body => callKind(body) === 'intake')).toHaveLength(0)
+      expect(JSON.stringify(jev.bodies.filter(body => callKind(body) === 'audit').at(-1))).toContain('# Ship')
     } finally {
       await jev.close()
     }
@@ -88,7 +88,7 @@ describe('P1 plan-mode yield', () => {
 
       expect(ctx.sessionProjections.stateOf(agent.session, 'verifier')?.active).toBe(false)
       expect(JSON.stringify(adapter.requests[1]?.messages)).toContain('[verifier plan-score]')
-      expect(jev.bodies.some(body => (body as { point?: string }).point === 'plan')).toBe(true)
+      expect(jev.bodies.some(body => callKind(body) === 'plan')).toBe(true)
     } finally {
       await jev.close()
     }
@@ -115,7 +115,7 @@ describe('P1 plan-mode yield', () => {
       expect(JSON.stringify(adapter.requests[1]?.messages)).toContain('[verifier plan-score]')
       expect(logJson(agent)).toContain('keep planning')
       expect(ctx.sessionProjections.stateOf(agent.session, 'verifier')?.approvedPlan).toBeNull()
-      expect(jev.bodies.map(body => (body as { point?: string }).point)).toEqual(['plan'])
+      expect(jev.bodies.map(body => callKind(body))).toEqual(['plan'])
     } finally {
       await jev.close()
     }

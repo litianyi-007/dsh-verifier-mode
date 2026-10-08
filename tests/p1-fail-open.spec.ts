@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest'
 import { createAgent, send, waitForIdle } from '../spikes/support/harness.ts'
 import { MockAdapter, textResponse } from '../spikes/support/mock-adapter.ts'
-import { json, startJev } from './support/jev.ts'
+import { callKind, json, startJev } from './support/jev.ts'
 import { mountVerifier, verifierConfig } from './support/mount.ts'
 
 describe('P1 fail-open', () => {
@@ -57,7 +57,7 @@ describe('P1 fail-open', () => {
 
       expect(adapter.requests).toHaveLength(4)
       expect(JSON.stringify(adapter.requests[3]?.messages)).toContain('fewer than 2 candidates')
-      expect(jev.bodies.filter(body => (body as { point?: string }).point === 'intake')).toHaveLength(0)
+      expect(jev.bodies.filter(body => callKind(body) === 'intake')).toHaveLength(0)
     } finally {
       await jev.close()
     }

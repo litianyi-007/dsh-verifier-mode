@@ -5,7 +5,7 @@
 import { describe, expect, it } from 'vitest'
 import { createAgent, send, waitForIdle } from '../spikes/support/harness.ts'
 import { MockAdapter, textResponse } from '../spikes/support/mock-adapter.ts'
-import { json, passingAnswers, startJev } from './support/jev.ts'
+import { callKind, json, passingAnswers, startJev } from './support/jev.ts'
 import { mountVerifier, verifierConfig } from './support/mount.ts'
 
 function candidate(title: string, acceptance: string): ReturnType<typeof textResponse> {
@@ -48,7 +48,7 @@ describe('P1 D1 selection', () => {
       expect(main).toContain('[verifier decision] selected Test-first')
       expect(main).toContain('red tests first')
       expect(main).toContain('sk-test-secret')
-      expect(jev.bodies.filter(body => (body as { point?: string }).point === 'intake')).toHaveLength(3)
+      expect(jev.bodies.filter(body => callKind(body) === 'intake')).toHaveLength(3)
     } finally {
       await jev.close()
     }
