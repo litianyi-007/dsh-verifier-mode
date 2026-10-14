@@ -55,13 +55,15 @@ dsh plugin --profile desktop add ./dsh-verifier-mode-0.0.0.tgz
 
 Reopen Desktop after either command.
 
-A directory path (`dsh plugin --profile desktop add .`, or the Plugins page given a local path) records a `link:` dependency. Desktop already routes that linked package's `peerDependencies` to the host copies in the app. That is `routeLinked` in [deepseek-ai/deepseek-harness#9494](https://github.com/deepseek-ai/deepseek-harness/discussions/9494): it reads the peer declarations on this package. Keep `@deepseek-ai/*` and `zod` as peers. `npm install` in this checkout is for tests and `npm run build`; it can place those peers in the checkout's `node_modules`, and a nearer copy then loads instead of the host.
+A directory path (`dsh plugin --profile desktop add .`, or the Plugins page given a local path) records a `link:` dependency. For that external link, `routeLinked` occupies each declared peer with Desktop's host copy ([deepseek-ai/deepseek-harness#9494](https://github.com/deepseek-ai/deepseek-harness/discussions/9494)). A `node_modules` inside the checkout does not take those peers. Keep `@deepseek-ai/*` and `zod` declared as `peerDependencies`.
 
 ### Real directory
 
-Assemble a real directory only from package sources. Copy `package.json`, `lib/`, `cordis.patch.yml`, and `README.md` to `~/.dsh/profiles/desktop/node_modules/dsh-verifier-mode` (use `$DSH_HOME` when that variable is set). Leave `node_modules` out of the copy. Do not install this plugin's `peerDependencies` into that directory, and do not move them from `peerDependencies` into `dependencies`. Add `dsh-verifier-mode` to `dsh.profile.bundles` in the profile `package.json`. Reopen Desktop.
+Quit Desktop. Remove `~/.dsh/profiles/desktop/node_modules/dsh-verifier-mode` first when that path is a symlink or an older copy (use `$DSH_HOME` when that variable is set). Copying onto a symlink writes through to the checkout. In the profile `package.json`, clear `dependencies["dsh-verifier-mode"]` when the specifier is `link:`, or rewrite that specifier so it is not `link:`. Remove the same `link:` importer entry from the profile `pnpm-lock.yaml`. The next install recreates the symlink while that record remains.
 
-Leave the profile's pnpm files in place. `routeLinked` is the linked-package path, and the `routeLocalPackage` guard stays limited to profile layers. [#9494](https://github.com/deepseek-ai/deepseek-harness/discussions/9494) asks maintainers to keep that guard.
+Then copy package sources only — `package.json`, `lib/`, `cordis.patch.yml`, and `README.md` — to `~/.dsh/profiles/desktop/node_modules/dsh-verifier-mode`. Leave the checkout's `node_modules` out of the copy. Do not install this plugin's `peerDependencies` into that directory, and leave them as `peerDependencies`. Add `dsh-verifier-mode` to `dsh.profile.bundles` in the profile `package.json`. Reopen Desktop.
+
+`routeLinked` is the linked-package path, and the `routeLocalPackage` guard stays limited to profile layers. [#9494](https://github.com/deepseek-ai/deepseek-harness/discussions/9494) asks maintainers to keep that guard.
 
 ### Web UI
 
