@@ -26,17 +26,20 @@ DSH_ROOT=/absolute/path/to/deepseek-harness npm test
 
 This section is separate from the offline mock suite above. The suite does not install the plugin into a DeepSeek Harness profile and does not call TypeSafe.
 
-Install from a local checkout. Do not use a `github:` URL. This repository is private, its `package.json` exports point at `src/*.ts`, it has no `prepare` or `build` script, and a DeepSeek Harness git install does not run a build.
+Peer ranges target DeepSeek Harness Desktop `0.2.0-rc.2` and later `0.2.x` hosts, including `0.2.1-alpha.1`. Every `@deepseek-ai/dsh-*` peer is `^0.2.0-rc.2 || ^0.2.1-alpha.1`. `@deepseek-ai/schemastery` is `3.18.4 || >=3.18.5-alpha.1 <4` and `@deepseek-ai/cordis` is `4.0.4 || >=4.0.5-alpha.1 <5`, so the copies Desktop `0.2.0-rc.2` ships (`schemastery@3.18.4`, `cordis@4.0.4`) satisfy the declaration along with the `0.2.1-alpha.1` line.
 
-From any directory, pass the checkout path:
+Prefer a local directory. This repository is private. A `github:` URL can install, but `package.json` still exports `src/*.ts`, there is no `prepare` or `build` script, and a DeepSeek Harness git install does not compile that entry.
+
+From any directory, pass the checkout path. Use `desktop` for DeepSeek Harness Desktop and `web` for the Web UI:
 
 ```bash
+dsh plugin --profile desktop add /absolute/path/to/dsh-verifier-mode
 dsh plugin --profile web add /absolute/path/to/dsh-verifier-mode
 ```
 
-From inside the checkout, the same command is `dsh plugin --profile web add .`
+From inside the checkout, the same commands are `dsh plugin --profile desktop add .` and `dsh plugin --profile web add .`
 
-That command is the profile install in the DeepSeek Harness guide, [Package and install a plugin](https://github.com/deepseek-ai/deepseek-harness/blob/5badb15009ae1756c3afe0ae0cef1faafc290ccc/docs/user/develop/basic/publish.md#install-into-a-profile). The guide's example is `dsh plugin --profile demo add ./hello-plugin`. Here the profile is `web` and the package is this checkout. Then start the Web UI with `dsh web`.
+Those commands are the profile install in the DeepSeek Harness guide, [Package and install a plugin](https://github.com/deepseek-ai/deepseek-harness/blob/5badb15009ae1756c3afe0ae0cef1faafc290ccc/docs/user/develop/basic/publish.md#install-into-a-profile). The guide's example is `dsh plugin --profile demo add ./hello-plugin`. Then start the Web UI with `dsh web`.
 
 The DeepSeek key is set on Settings → Models. The TypeSafe key is set on Plugins → dsh-verifier-mode → Configure. That Configure control is there only after this plugin is installed.
 
