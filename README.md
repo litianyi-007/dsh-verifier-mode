@@ -36,28 +36,32 @@ After you pull source changes, rebuild before installing again. `npm install` ru
 npm run build
 ```
 
-Prefer a local directory over a `github:` URL. This repository is private.
+Prefer an install that materializes a real directory in the profile and does not nest host packages under this plugin. This repository is private, so a `github:` URL needs access to the repository. `lib/` is already committed, so that install does not need `allowBuilds`.
 
 ### Desktop
 
 Use the `dsh` that ships with Desktop. That binary is `resources/runtime/cli/bin/dsh` (`dsh.cmd` on Windows); Desktop can also register it with **Manage dsh Command…**. Quit Desktop first. An npm-installed `dsh` cannot change this profile. It exits with `profile "desktop" is managed exclusively by the Electron application`.
 
 ```bash
-dsh plugin --profile desktop add /absolute/path/to/dsh-verifier-mode
+dsh plugin --profile desktop add github:litianyi-007/dsh-verifier-mode
 ```
 
-From inside the checkout, the same command is `dsh plugin --profile desktop add .` Then reopen Desktop.
+A packed tarball is the same kind of install. `npm pack` follows the `files` list and leaves out `node_modules`:
 
-### If startup still says failed to import
+```bash
+npm pack
+dsh plugin --profile desktop add ./dsh-verifier-mode-0.0.0.tgz
+```
 
-`1 entry did not activate` / `dsh-verifier-mode failed to import` means the host import threw before a plugin fiber existed. With `lib/index.js` in place, the remaining Desktop `0.2.0-rc.2` case is a `link:` install ([deepseek-ai/deepseek-harness#9494](https://github.com/deepseek-ai/deepseek-harness/discussions/9494)). The Plugins page and `dsh plugin add <path>` record a `link:` dependency and a symlink at `~/.dsh/profiles/desktop/node_modules/dsh-verifier-mode`. Node realpaths that symlink out of the profile, so the plugin's host peer imports are not routed to the copies inside the Desktop app. The same files load when the directory is real.
+Reopen Desktop after either command.
 
-Quit Desktop, then:
+A directory path (`dsh plugin --profile desktop add .`, or the Plugins page given a local path) records a `link:` dependency. Desktop already routes that linked package's `peerDependencies` to the host copies in the app. That is `routeLinked` in [deepseek-ai/deepseek-harness#9494](https://github.com/deepseek-ai/deepseek-harness/discussions/9494): it reads the peer declarations on this package. Keep `@deepseek-ai/*` and `zod` as peers. `npm install` in this checkout is for tests and `npm run build`; it can place those peers in the checkout's `node_modules`, and a nearer copy then loads instead of the host.
 
-1. Copy this checkout — the directory that contains `package.json` and `lib/` — onto `~/.dsh/profiles/desktop/node_modules/dsh-verifier-mode`. Copy the files. Do not use `ln`, `mklink`, or a `link:` dependency. If `DSH_HOME` is set, replace `~/.dsh` with that directory.
-2. In `~/.dsh/profiles/desktop/package.json`, make sure `dsh.profile.bundles` includes `dsh-verifier-mode`. Remove this package's `link:` entry from `dependencies`. Leave every other dependency as it is.
-3. Remove the link leftovers for this package if they are present: `node_modules/dsh-verifier-mode` when it is still a symlink, and `node_modules/.ignored_dsh-verifier-mode`. Discussion #9494 also removes the profile's `pnpm-lock.yaml`, `node_modules/.pnpm`, `node_modules/.modules.yaml`, and `.pnpm-workspace-state-v1.json` when the profile was assembled only for this plugin. If other out-of-tree plugins are installed, leave those shared pnpm files in place.
-4. Reopen Desktop.
+### Real directory
+
+Assemble a real directory only from package sources. Copy `package.json`, `lib/`, `cordis.patch.yml`, and `README.md` to `~/.dsh/profiles/desktop/node_modules/dsh-verifier-mode` (use `$DSH_HOME` when that variable is set). Leave `node_modules` out of the copy. Do not install this plugin's `peerDependencies` into that directory, and do not move them from `peerDependencies` into `dependencies`. Add `dsh-verifier-mode` to `dsh.profile.bundles` in the profile `package.json`. Reopen Desktop.
+
+Leave the profile's pnpm files in place. `routeLinked` is the linked-package path, and the `routeLocalPackage` guard stays limited to profile layers. [#9494](https://github.com/deepseek-ai/deepseek-harness/discussions/9494) asks maintainers to keep that guard.
 
 ### Web UI
 
