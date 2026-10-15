@@ -33,6 +33,8 @@ export const en = {
   'cfg.flash.help': 'Per-session cap in CNY. Default ¥1. Choices: 0.5, 1, 2, 4. tokenbox/deepseek-flash, any provider’s deepseek-flash, and the old deepseek-v4-flash name use this tier.',
   'cfg.pro.label': 'deepseek-v4-pro cap',
   'cfg.pro.help': 'Per-session cap in CNY. Default ¥4. Choices: 1, 2, 4, 8.',
+  'cfg.unknown.label': 'Unknown model cap',
+  'cfg.unknown.help': 'Per-session cap in CNY for a model that is not flash or pro. Default ¥1, the lowest known tier. Choices: 0.5, 1, 2, 4.',
 } as const
 
 export const zh = {
@@ -69,6 +71,8 @@ export const zh = {
   'cfg.flash.help': '每会话上限，单位人民币 CNY。默认 1。可选 0.5、1、2、4。tokenbox/deepseek-flash、任意 provider 的 deepseek-flash，以及旧名 deepseek-v4-flash，都归入这一档。',
   'cfg.pro.label': 'deepseek-v4-pro 上限',
   'cfg.pro.help': '每会话上限，单位人民币 CNY。默认 4。可选 1、2、4、8。',
+  'cfg.unknown.label': '未登记模型上限',
+  'cfg.unknown.help': '未登记模型的会话上限，单位人民币 CNY。默认 1，取已知模型里最低的一档。可选 0.5、1、2、4。',
 } as const
 
 export type VerifierLocaleKey = keyof typeof en

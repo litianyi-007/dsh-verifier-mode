@@ -5,6 +5,8 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { AttachmentId } from '@deepseek-ai/dsh-attachment'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { createElement } from 'react'
 import { describe, expect, it } from 'vitest'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
@@ -18,7 +20,7 @@ import { en, zh } from '../src/client/locales.ts'
 import { renderKeyForm } from '../src/client/key-form.ts'
 import type { VerifierSettingsForm } from '../src/client/settings-form.ts'
 import { renderSettingsForm } from '../src/client/settings-form.ts'
-import { forgetSpendCache, flushUsageStore, releaseUsageStore, sessionCostLines, sessionSpendCny } from '../src/cost-book.ts'
+import { addCostLine, forgetSpendCache, flushUsageStore, releaseUsageStore, sessionCostLines, sessionSpendCny } from '../src/cost-book.ts'
 import { deterministicSkip } from '../src/intake-gate.ts'
 import * as plugin from '../src/index.ts'
 import { readVerifierTraces } from '../src/trace.ts'
@@ -174,6 +176,145 @@ describe('intake gate', () => {
       expect(jev.bodies.filter(body => callKind(body) === 'gate')).toHaveLength(2)
       expect(jev.bodies.filter(body => callKind(body) === 'intake')).toHaveLength(3)
       expect(adapter.requests.filter(request => request.reasoningEffort === 'low').length).toBe(3)
+    } finally {
+      await jev.close()
+    }
+  })
+
+  it('does not pause a single-step turn when only the K reserve would exceed the cap', async () => {
+    const jev = await startJev((body, response) => {
+      if (callKind(body) === 'gate') {
+        json(response, 200, {
+          usage: { inputTokens: 1, outputTokens: 0 },
+          answers: { needs_multi_step_work: { type: 'noul', noul: 0.2 } },
+        })
+        return
+      }
+      json(response, 200, { usage: { inputTokens: 1, outputTokens: 0 }, answers: passingAnswers() })
+    })
+    try {
+      const adapter = new MockAdapter([textResponse('short answer')])
+      const ctx = await mountVerifier(adapter, verifierConfig(jev.url, {
+        intakeGate: 'gated',
+        cost: { maxPerSession: 0.04 },
+      }))
+      const agent = await createAgent(ctx, 'gate-near-cap')
+      await ctx.commands.execute(agent, '/verifier on', [], new AbortController().signal)
+      const idle = waitForIdle(ctx, agent)
+      send(agent, 'answer this in a single sentence')
+      await idle
+
+      const main = JSON.stringify(adapter.requests[0]?.messages)
+      expect(main).toContain('不需要多步改动')
+      expect(main).toContain('完成时仍会审计')
+      expect(main).not.toContain('[verifier cost-cap]')
+      expect(ctx.sessionProjections.stateOf(agent.session, 'verifier')?.paused).toBe(false)
+      expect(jev.bodies.filter(body => callKind(body) === 'gate')).toHaveLength(1)
+      expect(jev.bodies.filter(body => callKind(body) === 'audit')).toHaveLength(1)
+      expect(adapter.requests.filter(request => request.reasoningEffort === 'low')).toHaveLength(0)
+    } finally {
+      await jev.close()
+    }
+  })
+
+  it('pauses before the cheap gate once spend is already at the cap', async () => {
+    const jev = await startJev((_body, response) => {
+      json(response, 500, { error: 'should not be called' })
+    })
+    try {
+      const adapter = new MockAdapter([textResponse('normal path')])
+      const ctx = await mountVerifier(adapter, verifierConfig(jev.url, {
+        intakeGate: 'gated',
+        cost: { maxPerSession: 0.04 },
+      }))
+      const agent = await createAgent(ctx, 'gate-at-cap')
+      await addCostLine('gate-at-cap', {
+        source: 'jev',
+        model: 'jev',
+        amountCny: 0.04,
+        nativeAmount: 0.04,
+        nativeCurrency: 'CNY',
+      })
+      await ctx.commands.execute(agent, '/verifier on', [], new AbortController().signal)
+      const idle = waitForIdle(ctx, agent)
+      send(agent, 'fix the parser and add a regression test')
+      await idle
+
+      expect(jev.bodies).toHaveLength(0)
+      expect(JSON.stringify(adapter.requests[0]?.messages)).toContain('[verifier cost-cap]')
+      expect(ctx.sessionProjections.stateOf(agent.session, 'verifier')?.paused).toBe(true)
+    } finally {
+      await jev.close()
+    }
+  })
+
+  it('records a Jev gate error and still runs the completion audit', async () => {
+    const jev = await startJev((body, response) => {
+      if (callKind(body) === 'gate') {
+        json(response, 500, { error: 'down' })
+        return
+      }
+      json(response, 200, { usage: { inputTokens: 1, outputTokens: 0 }, answers: passingAnswers() })
+    })
+    try {
+      const adapter = new MockAdapter([textResponse('normal path')])
+      const ctx = await mountVerifier(adapter, verifierConfig(jev.url, { intakeGate: 'gated' }))
+      const agent = await createAgent(ctx, 'gate-failed')
+      await ctx.commands.execute(agent, '/verifier on', [], new AbortController().signal)
+      const idle = waitForIdle(ctx, agent)
+      send(agent, 'fix the parser and add a regression test')
+      await idle
+
+      const main = JSON.stringify(adapter.requests[0]?.messages)
+      expect(main).toContain('入口判断失败')
+      expect(main).toContain('完成时仍会审计')
+      expect(jev.bodies.filter(body => callKind(body) === 'audit')).toHaveLength(1)
+      expect(adapter.requests.filter(request => request.reasoningEffort === 'low')).toHaveLength(0)
+      const traces = readVerifierTraces(String(agent.session.id))
+      expect(traces).toEqual(expect.arrayContaining([
+        expect.objectContaining({ point: 'gate', outcome: 'skipped', reason: 'gate-failed: jev 500' }),
+      ]))
+      expect(traces.some(record => record.point === 'audit' && record.outcome === 'skipped')).toBe(false)
+    } finally {
+      await jev.close()
+    }
+  })
+
+  it('treats an attachment with empty text as work and does not send that empty text to the gate', async () => {
+    const jev = await startJev((body, response) => {
+      const title = (body as { state?: { candidate?: { title?: string } } }).state?.candidate?.title
+      json(response, 200, { usage: { inputTokens: 10, outputTokens: 0 }, answers: passingAnswers(title === 'Test-first' ? 4 : 1) })
+    })
+    try {
+      const adapter = new MockAdapter([
+        candidate('Minimal'),
+        candidate('Test-first'),
+        candidate('Investigate'),
+        textResponse('executed'),
+      ])
+      const ctx = await mountVerifier(adapter, verifierConfig(jev.url, { intakeGate: 'gated' }))
+      const agent = await createAgent(ctx, 'gate-attachment')
+      await ctx.commands.execute(agent, '/verifier on', [], new AbortController().signal)
+      const idle = waitForIdle(ctx, agent)
+      agent.followup(createUserMessage({
+        content: [{
+          type: 'file',
+          attachment: {
+            attachmentId: AttachmentId(`sha256:${'ab'.repeat(32)}`),
+            name: 'notes.txt',
+            bytes: 4,
+          },
+        }],
+        source: { kind: 'user' },
+      }))
+      await idle
+
+      expect(jev.bodies.filter(body => callKind(body) === 'gate')).toHaveLength(0)
+      expect(jev.bodies.filter(body => callKind(body) === 'intake')).toHaveLength(3)
+      expect(JSON.stringify(adapter.requests.at(-1)?.messages)).toContain('selected Test-first')
+      expect(readVerifierTraces(String(agent.session.id))).toEqual(expect.arrayContaining([
+        expect.objectContaining({ point: 'gate', outcome: 'passed', reason: 'attachment' }),
+      ]))
     } finally {
       await jev.close()
     }
@@ -387,7 +528,9 @@ describe('Configure help', () => {
     expect(copy).toContain(zh['cfg.candidates.help'])
     expect(copy).toContain(zh['cfg.flash.help'])
     expect(copy).toContain(zh['cfg.scope.help'])
+    expect(copy).toContain(zh['cfg.unknown.help'])
     expect(copy).toContain(zh['key.label'])
+    expect(copy.split(zh['cfg.cost.currency']).length - 1).toBe(1)
 
     const tree = page as ReturnType<typeof createElement>
     const selects: { props: { 'aria-label'?: string; onChange?: (event: { target: { value: string } }) => void } }[] = []
@@ -403,6 +546,9 @@ describe('Configure help', () => {
     const candidates = selects.find(item => item.props['aria-label'] === zh['cfg.candidates.label'])
     candidates?.props.onChange?.({ target: { value: '4' } })
     expect(writes).toContainEqual({ path: ['candidates'], value: 4 })
+    const unknown = selects.find(item => item.props['aria-label'] === zh['cfg.unknown.label'])
+    unknown?.props.onChange?.({ target: { value: '2' } })
+    expect(writes).toContainEqual({ path: ['cost', 'maxPerSession'], value: 2 })
     const details = texts(page)
     expect(details.join('\n')).toContain(zh['cfg.cost.summary'])
   })

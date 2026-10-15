@@ -1,6 +1,6 @@
 # dsh-verifier-mode
 
-P1 verifier-mode plugin for DeepSeek Harness, plus the P0 spikes that proved the extension points. The plugin switches per session, picks one of three read-only strategies, audits the turn once, yields to plan mode, and pauses at a per-model CNY cap.
+P1 verifier-mode plugin for DeepSeek Harness, plus the P0 spikes that proved the extension points. The plugin switches per session. When the mode is on, a non-trivial multi-step request gets several read-only plans from the current model, and the highest-scoring plan becomes the next execution strategy. It audits the turn once, yields to plan mode, and pauses at a per-model CNY cap.
 
 Tests run against a local checkout of [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness). They use DSH's mock model adapter and a local HTTP mock. They do not call DeepSeek, TypeSafe, Jev, or any other hosted model, and they do not need an API key.
 

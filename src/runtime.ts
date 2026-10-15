@@ -63,7 +63,7 @@ const steers = new Map<string, number>()
 const planNotes = new Map<string, UserMessage>()
 const turnStrategy = new Map<string, string[]>()
 const postSteer = new Set<string>()
-/** Turns whose intake gate already decided this is not work. D4 does not spend a Jev call. */
+/** Greetings, slash commands, and other deterministic trivial skips. D4 does not spend a Jev call. A failed or single-step gate still audits. */
 const skipAudit = new Set<string>()
 
 /** The next main-agent assistant steps belong to a D4 steer until the turn moves on. */
@@ -265,6 +265,7 @@ function candidateTraces(
   items: readonly GeneratedCandidate[],
   scored: readonly ScoredCandidate[] | undefined,
   rules: SelectionRules,
+  unscoredReason?: string,
 ): CandidateTrace[] {
   return items.map((item) => {
     if (item.candidate === undefined) {
@@ -272,6 +273,15 @@ function candidateTraces(
     }
     const score = scored?.find(row => row.candidate.id === item.candidate?.id)
     if (score === undefined) {
+      if (unscoredReason !== undefined) {
+        return {
+          id: item.candidate.id,
+          strategy: item.strategy,
+          kept: false,
+          title: item.candidate.title,
+          dropReason: unscoredReason,
+        }
+      }
       return {
         id: item.candidate.id,
         strategy: item.strategy,
@@ -325,10 +335,15 @@ async function skipGate(
   decision: EnterDecision,
   reason: 'command' | 'trivial' | 'single-step' | 'gate-failed',
   auditOn: boolean,
+  detail?: string,
 ): Promise<EnterDecision> {
-  if (reason !== 'single-step') skipAudit.add(`${sessionId}:${turn}`)
-  await pushTrace(sessionId, { point: 'gate', outcome: 'skipped', reason })
-  return { ...decision, messages: [...decision.messages, intakeSkipNotice(reason, auditOn && reason === 'single-step')] }
+  if (reason === 'command' || reason === 'trivial') skipAudit.add(`${sessionId}:${turn}`)
+  const recorded = reason === 'gate-failed' && detail !== undefined && detail !== ''
+    ? `gate-failed: ${detail}`
+    : reason
+  await pushTrace(sessionId, { point: 'gate', outcome: 'skipped', reason: recorded })
+  const promiseAudit = auditOn && (reason === 'single-step' || reason === 'gate-failed')
+  return { ...decision, messages: [...decision.messages, intakeSkipNotice(reason, promiseAudit)] }
 }
 
 export async function runIntake(
@@ -359,10 +374,10 @@ export async function runIntake(
   const generator = config.generatorRoute ?? { provider: current.provider, model: current.model }
   const generatorRoute = routeOf(generator.provider, generator.model)
   const cap = resolveCap(mainRoute, config.cost, config.pricing.aliases)
-  const spent = sessionSpendCny(sessionId, scope)
-  const estimate = estimateIntakeCny(config.candidates, config.candidateMaxTokens, generatorRoute, costClock.now(), config.pricing)
-  const over = spent >= cap.amount || spent + estimate > cap.amount
-  if (over) {
+  let spent = sessionSpendCny(sessionId, scope)
+  // Already at the cap: pause before the cheap gate and before an approved plan runs.
+  // The K-candidate reserve waits until the gate has said yes.
+  if (spent >= cap.amount) {
     return { ...decision, messages: await pause(sessionId, spent, cap, decision.messages, state?.paused === true, scope) }
   }
 
@@ -379,28 +394,42 @@ export async function runIntake(
   const task = clipTask(textOf(messages))
   const facts = userTurnFacts(messages)
   if (config.intakeGate !== 'always') {
-    let gate: 'yes' | 'no' | 'failed' | 'cap' = 'failed'
-    try {
-      const response = await postJev(config.jev.baseUrl, await resolveJevApiKey(ctx, config), {
-        point: 'gate',
-        state: { task: clipTask(facts.text), constraints: [], evidence: '' },
-        questions: [GATE_QUESTION],
-      }, signal, config.jev.timeoutMs)
-      await billJev(sessionId, response)
-      if (sessionSpendCny(sessionId, scope) >= cap.amount) gate = 'cap'
-      else {
-        const answer = response.answers.needs_multi_step_work
-        if (answer === undefined || !Number.isFinite(answer.value)) gate = 'failed'
-        else gate = answer.value >= INTAKE_GATE_THRESHOLD ? 'yes' : 'no'
+    if (facts.hasAttachment && facts.text.trim() === '') {
+      await pushTrace(sessionId, { point: 'gate', outcome: 'passed', reason: 'attachment' })
+    } else {
+      let gate: 'yes' | 'no' | 'failed' | 'cap' = 'failed'
+      let gateStatus = 'missing answer'
+      try {
+        const response = await postJev(config.jev.baseUrl, await resolveJevApiKey(ctx, config), {
+          point: 'gate',
+          state: { task: clipTask(facts.text), constraints: [], evidence: '' },
+          questions: [GATE_QUESTION],
+        }, signal, config.jev.timeoutMs)
+        await billJev(sessionId, response)
+        if (sessionSpendCny(sessionId, scope) >= cap.amount) gate = 'cap'
+        else {
+          const answer = response.answers.needs_multi_step_work
+          if (answer === undefined || !Number.isFinite(answer.value)) {
+            gate = 'failed'
+            gateStatus = 'missing answer'
+          } else gate = answer.value >= INTAKE_GATE_THRESHOLD ? 'yes' : 'no'
+        }
+      } catch (error) {
+        gate = 'failed'
+        gateStatus = error instanceof Error ? error.message : 'jev failed'
       }
-    } catch {
-      gate = 'failed'
+      if (gate === 'cap') {
+        return { ...decision, messages: await pause(sessionId, sessionSpendCny(sessionId, scope), cap, messages, false, scope) }
+      }
+      if (gate === 'no') return skipGate(sessionId, turn, { ...decision, messages }, 'single-step', config.audit)
+      if (gate === 'failed') return skipGate(sessionId, turn, { ...decision, messages }, 'gate-failed', config.audit, gateStatus)
     }
-    if (gate === 'cap') {
-      return { ...decision, messages: await pause(sessionId, sessionSpendCny(sessionId, scope), cap, messages, false, scope) }
-    }
-    if (gate === 'no') return skipGate(sessionId, turn, { ...decision, messages }, 'single-step', config.audit)
-    if (gate === 'failed') return skipGate(sessionId, turn, { ...decision, messages }, 'gate-failed', config.audit)
+  }
+
+  spent = sessionSpendCny(sessionId, scope)
+  const estimate = estimateIntakeCny(config.candidates, config.candidateMaxTokens, generatorRoute, costClock.now(), config.pricing)
+  if (spent + estimate > cap.amount) {
+    return { ...decision, messages: await pause(sessionId, spent, cap, messages, state?.paused === true, scope) }
   }
 
   const evidence = delimitEvidence(readJudgeDigest(ctx.sessionProjections, agent.session), freshNonce())
@@ -423,7 +452,7 @@ export async function runIntake(
         false,
         scope,
         'intake',
-        candidateTraces(generated.items, undefined, intakeRules(config)),
+        candidateTraces(generated.items, undefined, intakeRules(config), 'cost-cap'),
       ),
     }
   }
@@ -460,7 +489,7 @@ export async function runIntake(
             false,
             scope,
             'intake',
-            candidateTraces(generated.items, scored, rules),
+            candidateTraces(generated.items, scored, rules, 'cost-cap'),
           ),
         }
       }
@@ -607,6 +636,20 @@ export async function scorePlan(
   const armed = state?.active === true || state?.onceArmed === true
   if (!armed || config.planReview !== 'advise' || state?.paused === true || !await judgeReady(ctx, config)) return
   const sessionId = sessionKey(agent.session.id)
+  const current = readCurrentRoute(ctx.sessionProjections, agent.session, agent.options)
+  const cap = resolveCap(routeOf(current.provider, current.model), config.cost, config.pricing.aliases)
+  const spent = sessionSpendCny(sessionId, config.cost.scope)
+  if (spent >= cap.amount) {
+    await pushTrace(sessionId, {
+      point: 'plan',
+      outcome: 'cost-cap',
+      spentCny: spent,
+      cap: cap.amount,
+      capModel: cap.model,
+      countedSources: countedSourceLabel(config.cost.scope),
+    })
+    return
+  }
   const task = clipTask(plan)
   const evidence = delimitEvidence(plan, freshNonce())
   try {

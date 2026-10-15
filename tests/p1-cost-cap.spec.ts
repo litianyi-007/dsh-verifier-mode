@@ -117,6 +117,10 @@ describe('P1 cost cap', () => {
       expect(stderr.join('')).toContain('dsh: verifier paused cost-cap')
       expect(adapter.requests).toHaveLength(4)
       expect(JSON.stringify(adapter.requests[3]?.messages)).toContain('Counted: generator+jev+post-steer')
+      const capped = readVerifierTraces(String(agent.session.id)).find(record => record.point === 'intake' && record.outcome === 'cost-cap')
+      const parsed = capped?.candidates?.find(item => item.title === 'Minimal')
+      expect(parsed?.kept).toBe(false)
+      expect(parsed?.dropReason).toBe('cost-cap')
       expect(sessionCostLines(String(agent.session.id)).some(line => line.model === 'deepseek/deepseek-flash' && line.source === 'generator')).toBe(true)
 
       const selection: ModelSelectionRef = {
