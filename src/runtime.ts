@@ -501,7 +501,7 @@ export async function runIntake(
       point: 'intake',
       outcome: 'fallback',
       reason,
-      candidates: candidateTraces(generated.items, scored, rules),
+      candidates: candidateTraces(generated.items, scored, rules, 'scoring-failed'),
     })
     return { ...decision, messages: [...messages, fallbackNotice(reason)] }
   }
