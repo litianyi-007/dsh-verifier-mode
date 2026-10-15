@@ -37,6 +37,7 @@ describe('P1 default Jev URL', () => {
         textResponse('scored on the default url'),
       ])
       const ctx = await mountVerifier(adapter, {
+        intakeGate: 'always',
         jev: { baseUrl: 'https://api.typesafe.ai', apiKey: 'test-key', timeoutMs: 5_000 },
       })
       const agent = await createAgent(ctx, 'p1-default-jev')

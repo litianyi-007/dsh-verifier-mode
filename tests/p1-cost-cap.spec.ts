@@ -83,8 +83,16 @@ describe('P1 cost cap', () => {
       return true
     }) as typeof process.stderr.write
     try {
+      const heavy = textResponse(JSON.stringify({
+        title: 'Minimal',
+        steps: ['step'],
+        acceptance: ['done'],
+        risks: [],
+      }), { inputTokens: 800_000, outputTokens: 1 })
       const adapter = new MockAdapter([
-        textResponse('over', { inputTokens: 800_000, outputTokens: 1 }),
+        heavy,
+        candidate('Test-first'),
+        candidate('Investigate'),
         textResponse('paused path'),
         candidate('Minimal'),
         candidate('Test-first'),
@@ -107,7 +115,8 @@ describe('P1 cost cap', () => {
       expect(spent).toBeLessThan(4)
       expect(ctx.sessionProjections.stateOf(agent.session, 'verifier')?.paused).toBe(true)
       expect(stderr.join('')).toContain('dsh: verifier paused cost-cap')
-      expect(adapter.requests).toHaveLength(2)
+      expect(adapter.requests).toHaveLength(4)
+      expect(JSON.stringify(adapter.requests[3]?.messages)).toContain('Counted: generator+jev+post-steer')
       expect(sessionCostLines(String(agent.session.id)).some(line => line.model === 'deepseek/deepseek-flash' && line.source === 'generator')).toBe(true)
 
       const selection: ModelSelectionRef = {

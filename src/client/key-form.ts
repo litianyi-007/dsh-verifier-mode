@@ -6,6 +6,8 @@ import { createElement, useEffect, useSyncExternalStore } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import { TYPESAFE_API_KEY_REF } from '../credential-ref.ts'
 import type { VerifierLocaleKey } from './locales.ts'
+import { renderSettingsForm } from './settings-form.ts'
+import type { VerifierSettingsForm } from './settings-form.ts'
 
 /** What `credentials.describe` may show a page. There is no value field. */
 export interface CredentialView {
@@ -253,6 +255,8 @@ export function renderKeyForm(props: KeyFormProps): ReactNode {
 export interface VerifierKeyPageProps extends VerifierKeyFace {
   view: 'summary' | 'page'
   t: (key: VerifierLocaleKey) => string
+  /** Host settings document for this row. The key itself stays in credentials. */
+  form?: VerifierSettingsForm
 }
 
 /** Row configuration page. Summary is the one-liner; page is the password form. */
@@ -260,11 +264,16 @@ export function VerifierKeyPage(props: VerifierKeyPageProps): ReactNode {
   const state = useSyncExternalStore(props.subscribe, props.getSnapshot, props.getSnapshot)
   useEffect(() => { void props.refresh() }, [props.refresh])
   if (props.view === 'summary') return props.t('key.summary')
-  return renderKeyForm({
-    t: props.t,
-    state,
-    onEdit: props.edit,
-    onSave: () => { void props.save() },
-    onClear: () => { void props.clear() },
-  })
+  return createElement(
+    'div',
+    null,
+    renderSettingsForm({ t: props.t, form: props.form }),
+    renderKeyForm({
+      t: props.t,
+      state,
+      onEdit: props.edit,
+      onSave: () => { void props.save() },
+      onClear: () => { void props.clear() },
+    }),
+  )
 }

@@ -50,16 +50,30 @@ export function decisionNotice(candidate: Candidate, composite: number, confiden
   )
 }
 
-export function fallbackNotice(reason: string): UserMessage {
+export function fallbackNotice(reason: string, summary?: string): UserMessage {
+  const detail = summary === undefined || summary === '' ? '' : ` ${summary}`
   return verifierNotice(
-    `[verifier fallback] Verifier could not decide: ${reason}`,
+    `[verifier fallback] Verifier could not decide: ${reason}.${detail}`,
     'verifier could not decide',
   )
 }
 
-export function costCapNotice(spent: number, cap: number, model: string): UserMessage {
+/** One line when the intake gate skips multi-candidate generation. */
+export function intakeSkipNotice(reason: 'command' | 'trivial' | 'single-step' | 'gate-failed', auditOn: boolean): UserMessage {
+  const audit = auditOn ? '完成时仍会审计。' : ''
+  const line = reason === 'command'
+    ? `[verifier skip] 这是斜杠命令，不生成多方案。${audit}`
+    : reason === 'trivial'
+      ? `[verifier skip] 这轮是闲聊或确认，不生成多方案。${audit}`
+      : reason === 'single-step'
+        ? `[verifier skip] 不需要多步改动，按普通路径执行。${audit}`
+        : `[verifier skip] 入口判断失败，按普通路径执行。${audit}`
+  return verifierNotice(line, 'verifier skipped intake')
+}
+
+export function costCapNotice(spent: number, cap: number, model: string, counted: string): UserMessage {
   return verifierNotice(
-    `${COST_CAP_MARK} spent ${spent.toFixed(2)} cap ${cap.toFixed(2)} CNY model ${model}. Verifier is paused; continue on the normal path.`,
+    `${COST_CAP_MARK} spent ${spent.toFixed(2)} cap ${cap.toFixed(2)} CNY model ${model}. Counted: ${counted}. Ordinary main-loop usage is excluded. Verifier is paused; continue on the normal path.`,
     'verifier paused cost cap',
   )
 }

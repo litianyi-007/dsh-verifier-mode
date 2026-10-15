@@ -41,13 +41,14 @@ export async function startJev(handler: (body: Record<string, unknown>, response
  * Audit is recognized by its question ids. A plan reuses the intake questions
  * and also carries `state.plan`.
  */
-export function callKind(body: unknown): 'intake' | 'audit' | 'plan' | 'other' {
+export function callKind(body: unknown): 'intake' | 'audit' | 'plan' | 'gate' | 'other' {
   if (body === null || typeof body !== 'object') return 'other'
   const record = body as { state?: { plan?: unknown }; questions?: unknown }
   const questions = record.questions
   if (questions === null || typeof questions !== 'object' || Array.isArray(questions)) return 'other'
   const keys = questions as Record<string, unknown>
   if ('unverified_claims' in keys || 'claims_supported_by_evidence' in keys) return 'audit'
+  if ('needs_multi_step_work' in keys && !('addresses_request' in keys)) return 'gate'
   if ('addresses_request' in keys && typeof record.state?.plan === 'string') return 'plan'
   if ('addresses_request' in keys) return 'intake'
   return 'other'

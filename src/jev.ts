@@ -34,7 +34,7 @@ export interface JevQuestion {
 }
 
 export interface JevRequest {
-  point: 'intake' | 'audit' | 'plan'
+  point: 'intake' | 'audit' | 'plan' | 'gate'
   state: JevState
   questions: JevQuestion[]
 }
@@ -98,6 +98,15 @@ const SCOPE_RUBRIC = [
   'Close to the requested scope',
   'Smallest change that does the job',
 ] as const
+
+/** Cheap intake gate. A high noul means the request needs multi-step work. Not a category label. */
+export const GATE_QUESTION: JevQuestion = {
+  key: 'needs_multi_step_work',
+  kind: 'noul',
+  instructions: 'This request needs multiple steps, or a change to external state, before it is done.',
+  yes: 'It needs multiple steps or a change to external state.',
+  no: 'It can be handled in one step without changing external state.',
+}
 
 export const INTAKE_QUESTIONS: JevQuestion[] = [
   {

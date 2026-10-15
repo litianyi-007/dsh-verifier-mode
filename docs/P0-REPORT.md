@@ -159,6 +159,8 @@ chip 的 `inject` 调 `/verifier on` 和 `/verifier off`。组件 `onClick` 在 
 
 **设计。** trace 放 sidecar，不进 session log，这条成立。用 JSON backend 的临时目录即可，不必用测试里那个未导出的 memory backend。不需要 core 改动。
 
+P1 把决策 trace 写进同一个 `verifier_trace` 域的 `traces` 表（费用仍在 `usage`）。进程内 Map 只是缓存；重启后下一次读取从 sidecar 装回。JSON backend 的文件一般是 profile storage 根目录下的 `verifier_trace.json`。非法候选的丢弃原因写在这条 trace 里，不再只存在于当次进程。
+
 ## 8. headless `--json` 与暂停 notice
 
 **试了什么。** `spikes/08-headless-json.spec.ts`。pre-step 塞入带 marker 的 pause notice，在 `send` 之前调用 `projectJsonRun`。跑完后只 `dispose()`，不调用 `finish()`。断言 stdout 行里有 assistant `text`，没有 `final`，也没有 marker。再 spy `process.stderr.write`：默认 `ctx.logger.warn` 不出现；按 app-boot 的 level 装一个内存 exporter 能收到 warn；显式 `process.stderr.write('dsh: …')` 出现。这次没有启动 `dsh` CLI，也没有执行 headless `index.ts` 里未导出的 `summarize()`。`finish(text)` 写的 `final` 来自调用方传入的字符串，不能当作 `summarize()` 跑过的证据，所以这条用例不再调用它。

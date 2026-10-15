@@ -32,29 +32,51 @@ function stringList(value: unknown): string[] | undefined {
   return value
 }
 
-/** Pull one candidate object out of a model reply. Empty or prose replies are invalid. */
-export function parseCandidate(text: string, id: string): ParsedCandidate | undefined {
+export type CandidateDropReason = 'empty' | 'not-json' | 'schema'
+
+/** Pull one candidate object out of a model reply, and say why a reply was dropped. */
+export function inspectCandidate(
+  text: string,
+  id: string,
+): { candidate?: ParsedCandidate; dropReason?: CandidateDropReason } {
+  if (text.trim() === '') return { dropReason: 'empty' }
   const start = text.indexOf('{')
   const end = text.lastIndexOf('}')
-  if (start < 0 || end <= start) return undefined
+  if (start < 0 || end <= start) return { dropReason: 'not-json' }
   let parsed: unknown
   try {
     parsed = JSON.parse(text.slice(start, end + 1))
   } catch {
-    return undefined
+    return { dropReason: 'not-json' }
   }
-  if (parsed === null || typeof parsed !== 'object') return undefined
+  if (parsed === null || typeof parsed !== 'object') return { dropReason: 'schema' }
   const record = parsed as Record<string, unknown>
   const steps = stringList(record.steps)
   const acceptance = stringList(record.acceptance)
   if (typeof record.title !== 'string' || record.title.trim() === '' || steps === undefined || acceptance === undefined) {
-    return undefined
+    return { dropReason: 'schema' }
   }
   return {
-    id,
-    title: record.title,
-    steps,
-    acceptance,
-    risks: stringList(record.risks) ?? [],
+    candidate: {
+      id,
+      title: record.title,
+      steps,
+      acceptance,
+      risks: stringList(record.risks) ?? [],
+    },
   }
+}
+
+/** Pull one candidate object out of a model reply. Empty or prose replies are invalid. */
+export function parseCandidate(text: string, id: string): ParsedCandidate | undefined {
+  return inspectCandidate(text, id).candidate
+}
+
+/** Strategies for this K. Extra slots past the built-in set keep a distinct id. */
+export function strategiesFor(candidates: number): string[] {
+  const count = Math.min(5, Math.max(2, Number.isFinite(candidates) ? Math.floor(candidates) : 3))
+  return Array.from({ length: count }, (_, index) => {
+    const name = STRATEGIES[index % STRATEGIES.length]!
+    return index < STRATEGIES.length ? name : `${name}-extra`
+  })
 }

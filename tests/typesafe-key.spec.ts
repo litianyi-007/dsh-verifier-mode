@@ -177,7 +177,7 @@ describe('TypeSafe credential', () => {
     const home = await mkdtemp(join(tmpdir(), 'dsh-verifier-key-'))
     homes.push(home)
     const patchBefore = await readFile(PATCH, 'utf8')
-    const { ctx, adapter } = await mountWithCredentials(home, defaultJev)
+    const { ctx, adapter } = await mountWithCredentials(home, { ...defaultJev, intakeGate: 'always' })
     await ctx.credentials.set(credentialRef(TYPESAFE_API_KEY_REF), SECRET)
 
     const described = await ctx.credentials.describe(credentialRef(TYPESAFE_API_KEY_REF))

@@ -51,6 +51,16 @@ export const DEFAULT_PRICING: PricingTable = {
   aliases: {
     'deepseek/deepseek-v4-flash': FLASH_ROUTE,
     'deepseek/deepseek-v4-flash-vision-exp': FLASH_ROUTE,
+    // Model-id keys apply to any provider. Desktop's tokenbox gateway
+    // reports `tokenbox/deepseek-flash`, which otherwise misses the flash cap.
+    'deepseek-flash': FLASH_ROUTE,
+    'deepseek-v4-flash': FLASH_ROUTE,
+    'deepseek-v4-flash-vision-exp': FLASH_ROUTE,
+    'deepseek-v4-pro': PRO_ROUTE,
+    'tokenbox/deepseek-flash': FLASH_ROUTE,
+    'tokenbox/deepseek-v4-flash': FLASH_ROUTE,
+    'tokenbox/deepseek-v4-flash-vision-exp': FLASH_ROUTE,
+    'tokenbox/deepseek-v4-pro': PRO_ROUTE,
   },
   models: {
     [FLASH_ROUTE]: {
@@ -84,7 +94,7 @@ export function routeOf(provider: string, model: string): string {
   return `${provider}/${model}`
 }
 
-export function canonicalRoute(route: string, aliases: Record<string, string>): string {
+function followAliases(route: string, aliases: Record<string, string>): string {
   const seen = new Set<string>()
   let current = route
   while (aliases[current] !== undefined && !seen.has(current)) {
@@ -92,6 +102,20 @@ export function canonicalRoute(route: string, aliases: Record<string, string>): 
     current = aliases[current]!
   }
   return current
+}
+
+/**
+ * Cap and price key. Exact route aliases win. Otherwise the model id
+ * (`deepseek-flash` on `tokenbox` or any other provider) maps to the same tier.
+ */
+export function canonicalRoute(route: string, aliases: Record<string, string>): string {
+  const exact = followAliases(route, aliases)
+  if (exact !== route) return exact
+  const slash = route.lastIndexOf('/')
+  const model = slash < 0 ? route : route.slice(slash + 1)
+  const viaModel = aliases[model]
+  if (viaModel !== undefined) return followAliases(viaModel, aliases)
+  return route
 }
 
 const WEEKDAY: Record<string, number> = {

@@ -10,11 +10,19 @@ import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { TokenUsage, UserMessage } from '@deepseek-ai/dsh-llm'
 import { costClock } from './clock.ts'
 import type { ResolvedConfig } from './config.ts'
-import { STRATEGIES, candidatePrompt, parseCandidate } from './candidates.ts'
+import { candidatePrompt, inspectCandidate, strategiesFor } from './candidates.ts'
 import type { ParsedCandidate } from './candidates.ts'
-import { addCostLine, ensureUsageStore, sessionKey, sessionSpendCny } from './cost-book.ts'
+import {
+  addCostLine,
+  countedSourceLabel,
+  ensureUsageStore,
+  sessionKey,
+  sessionSpendCny,
+} from './cost-book.ts'
+import type { CandidateTrace, CostScope } from './cost-book.ts'
 import { resolveJevApiKey } from './jev-key.ts'
 import {
+  GATE_QUESTION,
   INTAKE_QUESTIONS,
   auditQuestions,
   clipTask,
@@ -29,12 +37,14 @@ import {
   decisionNotice,
   fallbackNotice,
   incompleteNotice,
+  intakeSkipNotice,
   planScoreNotice,
   steerNotice,
 } from './notices.ts'
 import { estimateIntakeCny, priceJev, priceUsage, resolveCap, routeOf } from './pricing.ts'
 import { readCurrentRoute } from './route.ts'
-import { selectWinner } from './selector.ts'
+import { deterministicSkip, userTurnFacts, INTAKE_GATE_THRESHOLD } from './intake-gate.ts'
+import { scoreCandidate, scoreSummary, selectWinner } from './selector.ts'
 import type { ScoredCandidate, SelectionRules } from './selector.ts'
 import { readJudgeDigest } from './summary.ts'
 import { pushTrace } from './trace.ts'
@@ -52,6 +62,22 @@ interface PlanModeService {
 const steers = new Map<string, number>()
 const planNotes = new Map<string, UserMessage>()
 const turnStrategy = new Map<string, string[]>()
+const postSteer = new Set<string>()
+/** Turns whose intake gate already decided this is not work. D4 does not spend a Jev call. */
+const skipAudit = new Set<string>()
+
+/** The next main-agent assistant steps belong to a D4 steer until the turn moves on. */
+export function armPostSteer(sessionId: string): void {
+  postSteer.add(sessionId)
+}
+
+export function disarmPostSteer(sessionId: string): void {
+  postSteer.delete(sessionId)
+}
+
+export function postSteerArmed(sessionId: string): boolean {
+  return postSteer.has(sessionId)
+}
 
 const DEFAULT_JEV_URL = 'https://api.typesafe.ai'
 
@@ -119,6 +145,13 @@ interface LlmStream {
   }): AsyncIterable<GeneratorChunk>
 }
 
+interface GeneratedCandidate {
+  strategy: string
+  candidate?: ParsedCandidate
+  dropReason?: string
+  overCap: boolean
+}
+
 async function generateOne(
   ctx: Context,
   config: ResolvedConfig,
@@ -129,7 +162,9 @@ async function generateOne(
   task: string,
   signal: AbortSignal,
   cap: number,
-): Promise<{ candidate?: ParsedCandidate; overCap: boolean }> {
+  scope: CostScope,
+  onOverCap: () => void,
+): Promise<GeneratedCandidate> {
   // Event dispatch shadows the listener fiber, so `ctx.llm` throws
   // "without inject" even when this plugin lists `llm`. `get` reads the store.
   const llm = ctx.get('llm') as LlmStream | undefined
@@ -149,6 +184,7 @@ async function generateOne(
   let overCap = false
   let billed = false
   for await (const chunk of stream) {
+    if (signal.aborted) break
     if (chunk.type === 'finish' && chunk.reason?.kind === 'error') {
       throw new Error(chunk.reason.failure?.message ?? 'generator failed')
     }
@@ -163,31 +199,136 @@ async function generateOne(
         nativeAmount: priced.nativeAmount,
         nativeCurrency: priced.nativeCurrency,
       })
-      if (sessionSpendCny(sessionId) >= cap) overCap = true
+      if (sessionSpendCny(sessionId, scope) >= cap) {
+        overCap = true
+        onOverCap()
+      }
     }
     if (overCap) break
   }
   const text = chunks.flatMap(chunk => chunk.type === 'text-delta' && chunk.text ? [chunk.text] : []).join('')
-  return { candidate: parseCandidate(text, strategy), overCap }
+  const inspected = inspectCandidate(text, strategy)
+  if (inspected.dropReason !== undefined) {
+    process.stderr.write(`dsh: verifier dropped candidate strategy=${strategy} reason=${inspected.dropReason}\n`)
+  }
+  return { strategy, candidate: inspected.candidate, dropReason: inspected.dropReason, overCap }
 }
 
-function pause(
+/**
+ * K candidates at once, one shared model, distinct strategies.
+ * Concurrency is K (2–5). Crossing the cap aborts the rest of the batch.
+ */
+async function generateCandidates(
+  ctx: Context,
+  config: ResolvedConfig,
+  sessionId: string,
+  provider: string,
+  model: string,
+  task: string,
+  signal: AbortSignal,
+  cap: number,
+  scope: CostScope,
+): Promise<{ items: GeneratedCandidate[]; overCap: boolean }> {
+  const limiter = new AbortController()
+  const stop = () => { limiter.abort() }
+  if (signal.aborted) stop()
+  else signal.addEventListener('abort', stop, { once: true })
+  let overCap = false
+  const strategies = strategiesFor(config.candidates)
+  const items = await Promise.all(strategies.map(async (strategy) => {
+    try {
+      const generated = await generateOne(
+        ctx, config, sessionId, provider, model, strategy, task, limiter.signal, cap, scope,
+        () => { overCap = true; stop() },
+      )
+      if (generated.overCap) overCap = true
+      return generated
+    } catch (error) {
+      const reason = limiter.signal.aborted && !signal.aborted
+        ? 'aborted'
+        : (error instanceof Error ? error.message : 'generator failed')
+      if (reason !== 'aborted') {
+        process.stderr.write(`dsh: verifier dropped candidate strategy=${strategy} reason=${reason}\n`)
+      }
+      return {
+        strategy,
+        overCap: sessionSpendCny(sessionId, scope) >= cap,
+        dropReason: reason,
+      }
+    }
+  }))
+  signal.removeEventListener('abort', stop)
+  return { items, overCap: overCap || (!signal.aborted && sessionSpendCny(sessionId, scope) >= cap) }
+}
+
+function candidateTraces(
+  items: readonly GeneratedCandidate[],
+  scored: readonly ScoredCandidate[] | undefined,
+  rules: SelectionRules,
+): CandidateTrace[] {
+  return items.map((item) => {
+    if (item.candidate === undefined) {
+      return { id: item.strategy, strategy: item.strategy, kept: false, dropReason: item.dropReason ?? 'dropped' }
+    }
+    const score = scored?.find(row => row.candidate.id === item.candidate?.id)
+    if (score === undefined) {
+      return {
+        id: item.candidate.id,
+        strategy: item.strategy,
+        kept: true,
+        title: item.candidate.title,
+        ...item.dropReason === undefined ? {} : { dropReason: item.dropReason },
+      }
+    }
+    const detail = scoreCandidate(score, rules)
+    return {
+      id: item.candidate.id,
+      strategy: item.strategy,
+      kept: detail.eligible,
+      title: item.candidate.title,
+      composite: detail.composite,
+      confidence: detail.confidence,
+      eligible: detail.eligible,
+      ...detail.eligible ? {} : { dropReason: detail.reason ?? 'rejected', reason: detail.reason },
+    }
+  })
+}
+
+async function pause(
   sessionId: string,
   spent: number,
   cap: { amount: number; model: string },
   messages: UserMessage[],
   alreadyPaused: boolean,
-): UserMessage[] {
+  scope: CostScope,
+  point: 'intake' | 'audit' = 'intake',
+  candidates?: CandidateTrace[],
+): Promise<UserMessage[]> {
+  const counted = countedSourceLabel(scope)
   if (alreadyPaused) return messages
-  pushTrace(sessionId, {
-    point: 'intake',
+  await pushTrace(sessionId, {
+    point,
     outcome: 'cost-cap',
     spentCny: spent,
     cap: cap.amount,
     capModel: cap.model,
+    countedSources: counted,
+    ...candidates === undefined ? {} : { candidates },
   })
-  process.stderr.write(`dsh: verifier paused cost-cap spent=${spent.toFixed(2)} cap=${cap.amount.toFixed(2)} model=${cap.model}\n`)
-  return [...messages, costCapNotice(spent, cap.amount, cap.model)]
+  process.stderr.write(`dsh: verifier paused cost-cap spent=${spent.toFixed(2)} cap=${cap.amount.toFixed(2)} model=${cap.model} counted=${counted}\n`)
+  return [...messages, costCapNotice(spent, cap.amount, cap.model, counted)]
+}
+
+async function skipGate(
+  sessionId: string,
+  turn: number,
+  decision: EnterDecision,
+  reason: 'command' | 'trivial' | 'single-step' | 'gate-failed',
+  auditOn: boolean,
+): Promise<EnterDecision> {
+  if (reason !== 'single-step') skipAudit.add(`${sessionId}:${turn}`)
+  await pushTrace(sessionId, { point: 'gate', outcome: 'skipped', reason })
+  return { ...decision, messages: [...decision.messages, intakeSkipNotice(reason, auditOn && reason === 'single-step')] }
 }
 
 export async function runIntake(
@@ -199,22 +340,30 @@ export async function runIntake(
   decision: EnterDecision,
 ): Promise<EnterDecision> {
   await ensureUsageStore(ctx)
+  const sessionId = sessionKey(agent.session.id)
+  // A new user turn starts here. Earlier post-steer steps are already billed.
+  disarmPostSteer(sessionId)
   const state = ctx.sessionProjections.stateOf(agent.session, 'verifier')
   const effective = state?.active === true || state?.onceArmed === true
   if (!effective || !config.intake) return decision
   if (planActive(ctx, agent)) return decision
 
-  const sessionId = sessionKey(agent.session.id)
+  const scope = config.cost.scope
+  if (config.intakeGate !== 'always') {
+    const why = deterministicSkip(userTurnFacts(decision.messages))
+    if (why !== undefined) return skipGate(sessionId, turn, decision, why, config.audit)
+  }
+
   const current = readCurrentRoute(ctx.sessionProjections, agent.session, agent.options)
   const mainRoute = routeOf(current.provider, current.model)
   const generator = config.generatorRoute ?? { provider: current.provider, model: current.model }
   const generatorRoute = routeOf(generator.provider, generator.model)
   const cap = resolveCap(mainRoute, config.cost, config.pricing.aliases)
-  const spent = sessionSpendCny(sessionId)
+  const spent = sessionSpendCny(sessionId, scope)
   const estimate = estimateIntakeCny(config.candidates, config.candidateMaxTokens, generatorRoute, costClock.now(), config.pricing)
   const over = spent >= cap.amount || spent + estimate > cap.amount
   if (over) {
-    return { ...decision, messages: pause(sessionId, spent, cap, decision.messages, state?.paused === true) }
+    return { ...decision, messages: await pause(sessionId, spent, cap, decision.messages, state?.paused === true, scope) }
   }
 
   let messages = decision.messages
@@ -223,32 +372,76 @@ export async function runIntake(
   }
   if (state?.approvedPlan) return { ...decision, messages }
   if (!await judgeReady(ctx, config)) {
-    pushTrace(sessionId, { point: 'intake', outcome: 'fallback', reason: 'jev is not configured' })
+    await pushTrace(sessionId, { point: 'intake', outcome: 'fallback', reason: 'jev is not configured' })
     return { ...decision, messages: [...messages, fallbackNotice('jev is not configured')] }
   }
 
   const task = clipTask(textOf(messages))
-  const evidence = delimitEvidence(readJudgeDigest(ctx.sessionProjections, agent.session), freshNonce())
-  const strategies = STRATEGIES.slice(0, config.candidates)
-  const parsed: ParsedCandidate[] = []
-  for (const strategy of strategies) {
-    if (signal.aborted || sessionSpendCny(sessionId) >= cap.amount) {
-      return { ...decision, messages: pause(sessionId, sessionSpendCny(sessionId), cap, messages, false) }
+  const facts = userTurnFacts(messages)
+  if (config.intakeGate !== 'always') {
+    let gate: 'yes' | 'no' | 'failed' | 'cap' = 'failed'
+    try {
+      const response = await postJev(config.jev.baseUrl, await resolveJevApiKey(ctx, config), {
+        point: 'gate',
+        state: { task: clipTask(facts.text), constraints: [], evidence: '' },
+        questions: [GATE_QUESTION],
+      }, signal, config.jev.timeoutMs)
+      await billJev(sessionId, response)
+      if (sessionSpendCny(sessionId, scope) >= cap.amount) gate = 'cap'
+      else {
+        const answer = response.answers.needs_multi_step_work
+        if (answer === undefined || !Number.isFinite(answer.value)) gate = 'failed'
+        else gate = answer.value >= INTAKE_GATE_THRESHOLD ? 'yes' : 'no'
+      }
+    } catch {
+      gate = 'failed'
     }
-    const generated = await generateOne(ctx, config, sessionId, generator.provider, generator.model, strategy, task, signal, cap.amount)
-    if (generated.candidate) parsed.push(generated.candidate)
-    if (generated.overCap || sessionSpendCny(sessionId) >= cap.amount) {
-      return { ...decision, messages: pause(sessionId, sessionSpendCny(sessionId), cap, messages, false) }
+    if (gate === 'cap') {
+      return { ...decision, messages: await pause(sessionId, sessionSpendCny(sessionId, scope), cap, messages, false, scope) }
     }
-  }
-  if (parsed.length < 2) {
-    pushTrace(sessionId, { point: 'intake', outcome: 'fallback', reason: 'fewer than 2 candidates' })
-    return { ...decision, messages: [...messages, fallbackNotice('fewer than 2 candidates')] }
+    if (gate === 'no') return skipGate(sessionId, turn, { ...decision, messages }, 'single-step', config.audit)
+    if (gate === 'failed') return skipGate(sessionId, turn, { ...decision, messages }, 'gate-failed', config.audit)
   }
 
-  let scored: ScoredCandidate[]
+  const evidence = delimitEvidence(readJudgeDigest(ctx.sessionProjections, agent.session), freshNonce())
+  if (ctx.get('llm') === undefined) throw new Error('llm service is unavailable')
+  const generated = await generateCandidates(
+    ctx, config, sessionId, generator.provider, generator.model, task, signal, cap.amount, scope,
+  )
+  if (signal.aborted) {
+    await pushTrace(sessionId, { point: 'intake', outcome: 'skipped', reason: 'aborted', candidates: candidateTraces(generated.items, undefined, intakeRules(config)) })
+    return { ...decision, messages }
+  }
+  if (generated.overCap) {
+    return {
+      ...decision,
+      messages: await pause(
+        sessionId,
+        sessionSpendCny(sessionId, scope),
+        cap,
+        messages,
+        false,
+        scope,
+        'intake',
+        candidateTraces(generated.items, undefined, intakeRules(config)),
+      ),
+    }
+  }
+  const parsed = generated.items.flatMap(item => item.candidate === undefined ? [] : [item.candidate])
+  const rules = intakeRules(config)
+  if (parsed.length < 2) {
+    const dropped = generated.items.flatMap(item => item.dropReason === undefined ? [] : [`${item.strategy} ${item.dropReason}`]).join('; ')
+    await pushTrace(sessionId, {
+      point: 'intake',
+      outcome: 'fallback',
+      reason: 'fewer than 2 candidates',
+      candidates: candidateTraces(generated.items, undefined, rules),
+    })
+    return { ...decision, messages: [...messages, fallbackNotice('fewer than 2 candidates', dropped)] }
+  }
+
+  const scored: ScoredCandidate[] = []
   try {
-    scored = []
     for (const candidate of parsed) {
       const response = await postJev(config.jev.baseUrl, await resolveJevApiKey(ctx, config), {
         point: 'intake',
@@ -256,24 +449,57 @@ export async function runIntake(
         questions: INTAKE_QUESTIONS,
       }, signal, config.jev.timeoutMs)
       await billJev(sessionId, response)
-      if (sessionSpendCny(sessionId) >= cap.amount) {
-        return { ...decision, messages: pause(sessionId, sessionSpendCny(sessionId), cap, messages, false) }
+      if (sessionSpendCny(sessionId, scope) >= cap.amount) {
+        return {
+          ...decision,
+          messages: await pause(
+            sessionId,
+            sessionSpendCny(sessionId, scope),
+            cap,
+            messages,
+            false,
+            scope,
+            'intake',
+            candidateTraces(generated.items, scored, rules),
+          ),
+        }
       }
       scored.push({ candidate, answers: response.answers })
     }
   } catch (error) {
     const reason = error instanceof Error ? error.message : 'jev failed'
-    pushTrace(sessionId, { point: 'intake', outcome: 'fallback', reason })
+    await pushTrace(sessionId, {
+      point: 'intake',
+      outcome: 'fallback',
+      reason,
+      candidates: candidateTraces(generated.items, scored, rules),
+    })
     return { ...decision, messages: [...messages, fallbackNotice(reason)] }
   }
 
-  const selected = selectWinner(scored, intakeRules(config))
+  const summary = scoreSummary(scored, rules)
+  const selected = selectWinner(scored, rules)
   if (selected.kind === 'fallback') {
-    pushTrace(sessionId, { point: 'intake', outcome: 'fallback', reason: selected.reason })
-    return { ...decision, messages: [...messages, fallbackNotice(selected.reason)] }
+    await pushTrace(sessionId, {
+      point: 'intake',
+      outcome: 'fallback',
+      reason: selected.reason,
+      candidates: candidateTraces(generated.items, scored, rules),
+    })
+    return { ...decision, messages: [...messages, fallbackNotice(selected.reason, summary)] }
   }
   turnStrategy.set(`${sessionId}:${turn}`, selected.candidate.acceptance)
-  pushTrace(sessionId, { point: 'intake', outcome: 'committed', winner: selected.candidate.title, spentCny: sessionSpendCny(sessionId), cap: cap.amount, capModel: cap.model })
+  await pushTrace(sessionId, {
+    point: 'intake',
+    outcome: 'committed',
+    winner: selected.candidate.title,
+    reason: summary,
+    spentCny: sessionSpendCny(sessionId, scope),
+    cap: cap.amount,
+    capModel: cap.model,
+    countedSources: countedSourceLabel(scope),
+    candidates: candidateTraces(generated.items, scored, rules),
+  })
   return {
     ...decision,
     messages: [...messages, decisionNotice(selected.candidate, selected.composite, selected.confidence)],
@@ -292,13 +518,21 @@ export async function runAudit(
   const effective = state?.active === true || state?.onceArmed === true
   if (!effective || !config.audit || state?.paused === true || planActive(ctx, agent) || !await judgeReady(ctx, config)) return
   const sessionId = sessionKey(agent.session.id)
+  if (skipAudit.has(`${sessionId}:${turn}`)) {
+    await pushTrace(sessionId, { point: 'audit', outcome: 'skipped', reason: 'intake-gate' })
+    return
+  }
   const current = readCurrentRoute(ctx.sessionProjections, agent.session, agent.options)
   const cap = resolveCap(routeOf(current.provider, current.model), config.cost, config.pricing.aliases)
-  if (sessionSpendCny(sessionId) >= cap.amount) {
+  const scope = config.cost.scope
+  const spent = sessionSpendCny(sessionId, scope)
+  if (spent >= cap.amount) {
+    disarmPostSteer(sessionId)
     if (state?.paused !== true) {
-      agent.session.append('user/message', costCapNotice(sessionSpendCny(sessionId), cap.amount, cap.model), { surfaceOp: 'append' })
-      process.stderr.write(`dsh: verifier paused cost-cap spent=${sessionSpendCny(sessionId).toFixed(2)} cap=${cap.amount.toFixed(2)} model=${cap.model}\n`)
-      pushTrace(sessionId, { point: 'audit', outcome: 'cost-cap', spentCny: sessionSpendCny(sessionId), cap: cap.amount, capModel: cap.model })
+      const counted = countedSourceLabel(scope)
+      agent.session.append('user/message', costCapNotice(spent, cap.amount, cap.model, counted), { surfaceOp: 'append' })
+      process.stderr.write(`dsh: verifier paused cost-cap spent=${spent.toFixed(2)} cap=${cap.amount.toFixed(2)} model=${cap.model} counted=${counted}\n`)
+      await pushTrace(sessionId, { point: 'audit', outcome: 'cost-cap', spentCny: spent, cap: cap.amount, capModel: cap.model, countedSources: counted })
     }
     return
   }
@@ -321,27 +555,42 @@ export async function runAudit(
       questions: auditQuestions(acceptance),
     }, signal, config.jev.timeoutMs)
     await billJev(sessionId, response)
+    if (sessionSpendCny(sessionId, scope) >= cap.amount) {
+      disarmPostSteer(sessionId)
+      const counted = countedSourceLabel(scope)
+      const now = sessionSpendCny(sessionId, scope)
+      if (state?.paused !== true) {
+        agent.session.append('user/message', costCapNotice(now, cap.amount, cap.model, counted), { surfaceOp: 'append' })
+        process.stderr.write(`dsh: verifier paused cost-cap spent=${now.toFixed(2)} cap=${cap.amount.toFixed(2)} model=${cap.model} counted=${counted}\n`)
+      }
+      await pushTrace(sessionId, { point: 'audit', outcome: 'cost-cap', spentCny: now, cap: cap.amount, capModel: cap.model, countedSources: counted })
+      return
+    }
     failed = auditQuestions(acceptance).flatMap((question) => {
       if (question.kind !== 'noul') return []
       const answer = response.answers[question.key]
       return answer !== undefined && answer.value >= config.thresholds.violation ? [question.key] : []
     })
   } catch (error) {
-    pushTrace(sessionId, { point: 'audit', outcome: 'fallback', reason: error instanceof Error ? error.message : 'jev failed' })
+    disarmPostSteer(sessionId)
+    await pushTrace(sessionId, { point: 'audit', outcome: 'fallback', reason: error instanceof Error ? error.message : 'jev failed' })
     return
   }
   if (failed.length === 0) {
-    pushTrace(sessionId, { point: 'audit', outcome: 'passed' })
+    disarmPostSteer(sessionId)
+    await pushTrace(sessionId, { point: 'audit', outcome: 'passed' })
     return
   }
   const used = steers.get(`${sessionId}:${turn}`) ?? 0
   if (used < config.maxAuditRounds) {
     steers.set(`${sessionId}:${turn}`, used + 1)
-    pushTrace(sessionId, { point: 'audit', outcome: 'steered', reason: failed.join(',') })
+    armPostSteer(sessionId)
+    await pushTrace(sessionId, { point: 'audit', outcome: 'steered', reason: failed.join(',') })
     agent.steer(steerNotice(failed))
     return
   }
-  pushTrace(sessionId, { point: 'audit', outcome: 'incomplete', reason: failed.join(',') })
+  disarmPostSteer(sessionId)
+  await pushTrace(sessionId, { point: 'audit', outcome: 'incomplete', reason: failed.join(',') })
   agent.session.append('user/message', incompleteNotice(failed), { surfaceOp: 'append' })
 }
 
@@ -375,11 +624,11 @@ export async function scorePlan(
       ? `composite ${selected.composite.toFixed(2)}, confidence ${selected.confidence.toFixed(2)}`
       : selected.reason
     planNotes.set(callId, planScoreNotice(summary))
-    pushTrace(sessionId, { point: 'plan', outcome: 'plan-score', reason: summary })
+    await pushTrace(sessionId, { point: 'plan', outcome: 'plan-score', reason: summary })
   } catch (error) {
     const reason = error instanceof Error ? error.message : 'jev failed'
     planNotes.set(callId, planScoreNotice(reason))
-    pushTrace(sessionId, { point: 'plan', outcome: 'fallback', reason })
+    await pushTrace(sessionId, { point: 'plan', outcome: 'fallback', reason })
   }
 }
 
@@ -389,6 +638,7 @@ export function takePlanNote(callId: string): UserMessage | undefined {
   return note
 }
 
+/** Bill one main-agent step that follows a D4 steer. Ordinary main usage is not billed. */
 export async function billAssistantUsage(
   sessionId: string,
   provider: string,
@@ -398,7 +648,7 @@ export async function billAssistantUsage(
 ): void {
   const priced = priceUsage(routeOf(provider, model), usage, costClock.now(), table)
   await addCostLine(sessionId, {
-    source: 'main',
+    source: 'post-steer',
     model: routeOf(provider, model),
     amountCny: priced.amountCny,
     nativeAmount: priced.nativeAmount,

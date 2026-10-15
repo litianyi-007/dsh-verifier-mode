@@ -46,7 +46,15 @@ Use the `dsh` that ships with Desktop. That binary is `resources/runtime/cli/bin
 dsh plugin --profile desktop add github:litianyi-007/dsh-verifier-mode
 ```
 
-A packed tarball is the same kind of install. `npm pack` follows the `files` list and leaves out `node_modules`:
+A stable local directory is the other install that Desktop can reload from. Quit Desktop first, then:
+
+```bash
+dsh plugin --profile desktop add /absolute/path/to/dsh-verifier-mode
+```
+
+Do not pin the profile to a tarball under `/tmp` (for example `file:/tmp/dsh-verifier-mode-pack.tgz`). That path disappears when `/tmp` is cleaned, and the profile can no longer reinstall. If `dependencies["dsh-verifier-mode"]` already points at a missing `/tmp` file, quit Desktop, delete that dependency and the matching `pnpm-lock.yaml` importer entry, then run the `github:` command or the local-directory command above.
+
+A packed tarball is the same kind of install when the file lives in a stable directory. `npm pack` follows the `files` list and leaves out `node_modules`:
 
 ```bash
 npm pack
@@ -77,6 +85,8 @@ From inside the checkout, that is `dsh plugin --profile web add .`
 
 That command is the profile install in the DeepSeek Harness guide, [Package and install a plugin](https://github.com/deepseek-ai/deepseek-harness/blob/5badb15009ae1756c3afe0ae0cef1faafc290ccc/docs/user/develop/basic/publish.md#install-into-a-profile). The guide's example is `dsh plugin --profile demo add ./hello-plugin`. Then start the Web UI with `dsh web`.
 
-The DeepSeek key is set on Settings → Models. The TypeSafe key is set on Plugins → dsh-verifier-mode → Configure. That Configure control is there only after this plugin is installed.
+The DeepSeek key is set on Settings → Models. Plugins → dsh-verifier-mode → Configure sets the TypeSafe key and the live knobs: candidate count K (2–5, default 3), the CNY per-session caps (flash default ¥1, pro default ¥4; `tokenbox/deepseek-flash` and the old `deepseek-v4-flash` name use the flash tier), which sources count toward that cap (design A by default: candidates, every Jev call, and main steps after a D4 steer; ordinary main-loop usage does not), the intake gate (automatic by default, or always-on for debugging), and the D4 audit switch. That page is there only after this plugin is installed.
+
+Decision traces and the cost ledger share the `verifier_trace` storage-domain sidecar (`usage` and `traces` tables). The process Map is a cache of that sidecar. With the JSON backend the file is the unit document, typically `verifier_trace.json` under the profile storage root.
 
 This document does not claim that a live TypeSafe call has been verified against a real account.
