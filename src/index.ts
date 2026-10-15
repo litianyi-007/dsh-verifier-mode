@@ -8,7 +8,7 @@ import { ledgerProjectionDefinition } from './ledger.ts'
 import { fallbackNotice, verifierModeNotice } from './notices.ts'
 import { createVerifierProjection } from './projection.ts'
 import { routeProjectionDefinition } from './route.ts'
-import { billAssistantUsage, runAudit, runIntake, scorePlan, takePlanNote } from './runtime.ts'
+import { billAssistantUsage, postSteerArmed, runAudit, runIntake, scorePlan, takePlanNote } from './runtime.ts'
 import { ensureUsageStore, sessionKey, watchUsageStore } from './cost-book.ts'
 import { judgeProjectionDefinition } from './summary.ts'
 
@@ -41,9 +41,13 @@ export async function apply(ctx: Context, config: unknown = { enabledByDefault: 
 
   ctx.on('session/event', (session, event) => {
     if (event.type !== 'assistant/message' || event.data.usage === undefined) return
+    const config = readConfig()
+    const id = sessionKey(session.id)
+    // Design §8 A: only D4 post-steer main steps count. Ordinary assistant usage does not.
+    if (!postSteerArmed(id) || config.cost.scope !== 'design') return
     const usage = event.data.usage as TokenUsage
     const source = event.data.message.source
-    void billAssistantUsage(sessionKey(session.id), source.provider, source.model, usage, readConfig().pricing).catch((error: unknown) => {
+    void billAssistantUsage(id, source.provider, source.model, usage, config.pricing).catch((error: unknown) => {
       const message = error instanceof Error ? error.message : 'unknown'
       process.stderr.write(`dsh: verifier cost ledger write failed: ${message}\n`)
     })

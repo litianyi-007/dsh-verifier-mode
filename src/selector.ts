@@ -92,6 +92,15 @@ export function scoreCandidate(
   return { eligible: true, composite, confidence, scope }
 }
 
+/** One short line per candidate: composite when eligible, otherwise the disqualify reason. */
+export function scoreSummary(scored: readonly ScoredCandidate[], rules: SelectionRules): string {
+  return scored.map((item) => {
+    const score = scoreCandidate(item, rules)
+    if (!score.eligible) return `${item.candidate.title} ineligible (${score.reason ?? 'rejected'})`
+    return `${item.candidate.title} ${score.composite.toFixed(2)} conf ${score.confidence.toFixed(2)}`
+  }).join('; ')
+}
+
 export function selectWinner(
   scored: readonly ScoredCandidate[],
   rules: SelectionRules,

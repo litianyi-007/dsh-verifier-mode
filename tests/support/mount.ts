@@ -7,6 +7,8 @@ import type { MockAdapter } from '../../spikes/support/mock-adapter.ts'
 export function verifierConfig(baseUrl: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     jev: { baseUrl, apiKey: 'test', timeoutMs: 5_000 },
+    // Existing scenarios assert scoring, not the intake gate. Gate tests opt into `gated`.
+    intakeGate: 'always',
     ...extra,
   }
 }

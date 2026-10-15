@@ -1,8 +1,9 @@
 /** Generator and Jev failures leave the turn on the normal path. */
 import { describe, expect, it } from 'vitest'
+import { readVerifierTraces } from '../src/trace.ts'
 import { createAgent, send, waitForIdle } from '../spikes/support/harness.ts'
 import { MockAdapter, textResponse } from '../spikes/support/mock-adapter.ts'
-import { callKind, json, startJev } from './support/jev.ts'
+import { callKind, json, passingAnswers, startJev } from './support/jev.ts'
 import { mountVerifier, verifierConfig } from './support/mount.ts'
 
 describe('P1 fail-open', () => {
@@ -58,6 +59,55 @@ describe('P1 fail-open', () => {
       expect(adapter.requests).toHaveLength(4)
       expect(JSON.stringify(adapter.requests[3]?.messages)).toContain('fewer than 2 candidates')
       expect(jev.bodies.filter(body => callKind(body) === 'intake')).toHaveLength(0)
+    } finally {
+      await jev.close()
+    }
+  })
+
+  it('marks candidates that were parsed but not scored when Jev fails mid-scoring', async () => {
+    let intakeCalls = 0
+    const jev = await startJev((body, response) => {
+      if (callKind(body) !== 'intake') {
+        json(response, 200, { usage: { inputTokens: 1, outputTokens: 0 }, answers: passingAnswers() })
+        return
+      }
+      intakeCalls += 1
+      if (intakeCalls >= 2) {
+        json(response, 500, { error: 'down' })
+        return
+      }
+      json(response, 200, { usage: { inputTokens: 10, outputTokens: 0 }, answers: passingAnswers(4) })
+    })
+    try {
+      const candidate = (title: string) => textResponse(JSON.stringify({
+        title,
+        steps: ['step'],
+        acceptance: ['done'],
+        risks: [],
+      }))
+      const adapter = new MockAdapter([
+        candidate('Minimal'),
+        candidate('Test-first'),
+        candidate('Investigate'),
+        textResponse('normal answer'),
+      ])
+      const ctx = await mountVerifier(adapter, verifierConfig(jev.url))
+      const agent = await createAgent(ctx, 'p1-jev-mid-score')
+      await ctx.commands.execute(agent, '/verifier on', [], new AbortController().signal)
+      const idle = waitForIdle(ctx, agent)
+      send(agent, 'fix the parser')
+      await idle
+
+      expect(JSON.stringify(adapter.requests.at(-1)?.messages)).toContain('[verifier fallback]')
+      expect(JSON.stringify(adapter.requests.at(-1)?.messages)).toContain('jev 500')
+      const fallback = readVerifierTraces(String(agent.session.id)).find(record => record.outcome === 'fallback')
+      const rows = fallback?.candidates ?? []
+      const scored = rows.find(item => item.title === 'Minimal')
+      const pending = rows.filter(item => item.title !== 'Minimal')
+      expect(scored?.kept).toBe(true)
+      expect(scored?.dropReason).toBeUndefined()
+      expect(pending.length).toBeGreaterThan(0)
+      expect(pending.every(item => item.kept === false && item.dropReason === 'scoring-failed')).toBe(true)
     } finally {
       await jev.close()
     }
