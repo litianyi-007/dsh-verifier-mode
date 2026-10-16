@@ -5,7 +5,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 import { Config, resolveConfig } from './config.ts'
 import type { ResolvedConfig } from './config.ts'
-import { FEEDBACK_DEFAULTS, detectPlatform, noticeTextForError } from './feedback.ts'
+import { FEEDBACK_DEFAULTS, commitFeedback, detectPlatform, prepareNoticeForError } from './feedback.ts'
 import { ledgerProjectionDefinition } from './ledger.ts'
 import { fallbackNotice, verifierModeNotice } from './notices.ts'
 import { createVerifierProjection } from './projection.ts'
@@ -29,10 +29,12 @@ function parseMode(rawInput: string): 'on' | 'off' | 'status' | 'once' | 'invali
 
 function reportLoadFailure(settings: ResolvedConfig['feedback'], error: unknown): void {
   try {
-    const text = noticeTextForError('plugin-load', settings, error, { platform: detectPlatform(), point: 'load' })
-    if (text !== undefined) process.stderr.write(`dsh: verifier feedback\n${text}\n`)
+    const prepared = prepareNoticeForError('plugin-load', settings, error, { platform: detectPlatform(), point: 'load' })
+    if (prepared === undefined) return
+    process.stderr.write(`dsh: verifier feedback\n${prepared.text}\n`)
+    commitFeedback('plugin-load', prepared.fingerprint)
   } catch {
-    // The original failure is rethrown. A draft must not replace it.
+    // The original failure is rethrown. An unwritten draft stays unclaimed.
   }
 }
 
@@ -78,7 +80,8 @@ async function applyPlugin(ctx: Context, readConfig: () => ResolvedConfig): Prom
       process.stderr.write(`dsh: verifier cost ledger write failed: ${message}\n`)
       for (const note of feedbackForThrown(id, config, error, 'ledger')) {
         try {
-          session.append('user/message', note, { surfaceOp: 'append' })
+          session.append('user/message', note.message, { surfaceOp: 'append' })
+          commitFeedback(id, note.fingerprint)
         } catch {
           process.stderr.write('dsh: verifier feedback notice could not be appended\n')
         }
@@ -94,12 +97,15 @@ async function applyPlugin(ctx: Context, readConfig: () => ResolvedConfig): Prom
     } catch (error) {
       const reason = error instanceof Error ? error.message : 'intake failed'
       const resolved = readConfig()
+      const sessionId = sessionKey(payload.agent.session.id)
+      const notes = feedbackForThrown(sessionId, resolved, error, 'intake')
+      for (const note of notes) commitFeedback(sessionId, note.fingerprint)
       return {
         ...decision,
         messages: [
           ...decision.messages,
           fallbackNotice(reason),
-          ...feedbackForThrown(sessionKey(payload.agent.session.id), resolved, error, 'intake'),
+          ...notes.map(note => note.message),
         ],
       }
     }
@@ -110,9 +116,11 @@ async function applyPlugin(ctx: Context, readConfig: () => ResolvedConfig): Prom
       await runAudit(ctx, readConfig(), payload.agent, payload.turn, payload.signal)
     } catch (error) {
       // Judge failures leave the turn on the normal path. The draft is separate.
-      for (const note of feedbackForThrown(sessionKey(payload.agent.session.id), readConfig(), error, 'audit')) {
+      const sessionId = sessionKey(payload.agent.session.id)
+      for (const note of feedbackForThrown(sessionId, readConfig(), error, 'audit')) {
         try {
-          payload.agent.session.append('user/message', note, { surfaceOp: 'append' })
+          payload.agent.session.append('user/message', note.message, { surfaceOp: 'append' })
+          commitFeedback(sessionId, note.fingerprint)
         } catch {
           process.stderr.write('dsh: verifier feedback notice could not be appended\n')
         }
@@ -132,9 +140,11 @@ async function applyPlugin(ctx: Context, readConfig: () => ResolvedConfig): Prom
       await scorePlan(ctx, readConfig(), agent, String(exec.callId), plan, exec.signal)
     } catch (error) {
       // Advice is optional. The tool decision is unchanged.
-      for (const note of feedbackForThrown(sessionKey(agent.session.id), readConfig(), error, 'plan')) {
+      const sessionId = sessionKey(agent.session.id)
+      for (const note of feedbackForThrown(sessionId, readConfig(), error, 'plan')) {
         try {
-          agent.session.append('user/message', note, { surfaceOp: 'append' })
+          agent.session.append('user/message', note.message, { surfaceOp: 'append' })
+          commitFeedback(sessionId, note.fingerprint)
         } catch {
           process.stderr.write('dsh: verifier feedback notice could not be appended\n')
         }

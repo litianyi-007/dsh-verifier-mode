@@ -91,11 +91,11 @@ Decision traces and the cost ledger share the `verifier_trace` storage-domain si
 
 ## 发布初期反馈
 
-安装或使用时如果遇到下面几类问题，会话通知里会有一份可复制的 Markdown 草稿：安装或运行失败、有影响的入口判断失败、Jev 报错、费用暂停、没有合格候选，以及能从错误信息里识别的 Desktop 导入问题。
+回合里的问题写进会话通知，正文可以复制：有影响的入口判断失败、Jev 报错、费用暂停、没有合格候选，以及运行中抛出的错误。安装失败和能识别的 Desktop 导入问题发生在 `apply()` 里，这时还没有会话。那份草稿写到 stderr，前缀是 `dsh: verifier feedback`，然后原来的错误继续抛出。
 
-草稿只写插件版本、DSH 平台、决策点、丢弃原因、分数摘要、费用范围和暂停计入来源。它不包含 API key、用户原文，也不包含完整会话记录。同一会话里相同指纹只提示一次。
+草稿包含插件版本、平台、决策点、结果、原因代码、丢弃原因代码、分数摘要、费用范围、计入来源，以及人民币已用和上限。原因和丢弃原因只保留已知代码，不保留模型或提供者返回的自由文本。它不包含 API key、用户原文、候选标题和完整会话记录。同一会话里相同指纹在成功写出之后只保留一次。指纹在进程内存里：追加或返回通知成功后才记下，失败可以再试。同一进程里两起失败如果重叠，可能各写一次。
 
-`feedback.enabled` 默认开启，通知里给出可复制的正文。`feedback.autoOpenGithub` 默认关闭。打开后，通知里额外附上 `litianyi-007/dsh-verifier-mode` 的预填新建 issue 链接（标题和正文）。链接给人或代理自己打开。默认路径不需要 GitHub token。
+`feedback.enabled` 默认开启。通知里是可复制的正文。`feedback.autoOpenGithub` 默认关闭。打开后，通知里多一条预填链接（`litianyi-007/dsh-verifier-mode` 的新建页面，带标题和正文）。请复制正文，或只打开这条链接。默认路径不需要 GitHub token。
 
 这个功能的 MVP 不包含静默执行 `gh issue create`，也不包含用 token 调用 GitHub API 自动建 issue。
 

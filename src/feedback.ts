@@ -20,10 +20,14 @@ export const FEEDBACK_REPO = 'litianyi-007/dsh-verifier-mode'
 export const FEEDBACK_MARK = '[verifier feedback]'
 
 const MAX_ISSUE_URL = 6_000
-const MAX_REASON = 240
-const MAX_DROP = 120
-const MAX_FIELD = 80
 const MAX_ROWS = 8
+
+/**
+ * Process-local. Record a fingerprint only after the notice is handed off.
+ * A failed append leaves it unrecorded, so a later event can try again.
+ * Two overlapping failures can both pass the check before either records.
+ */
+const seen = new Map<string, Set<string>>()
 
 export type FeedbackKind =
   | 'runtime'
@@ -119,26 +123,24 @@ const TITLE: Record<FeedbackKind, string> = {
   'no-eligible': 'no eligible candidate',
 }
 
-const seen = new Map<string, Set<string>>()
-
 /** Drop a session's fingerprints, or every session when id is omitted. */
 export function resetFeedbackDedupe(sessionId?: string): void {
   if (sessionId === undefined) seen.clear()
   else seen.delete(sessionId)
 }
 
-/**
- * @returns true the first time this fingerprint is seen for the session.
- */
-export function claimFeedback(sessionId: string, fingerprint: string): boolean {
+function remembered(sessionId: string, fingerprint: string): boolean {
+  return seen.get(sessionId)?.has(fingerprint) === true
+}
+
+/** Remember a fingerprint after the notice was actually written or returned. */
+export function commitFeedback(sessionId: string, fingerprint: string): void {
   let bag = seen.get(sessionId)
   if (bag === undefined) {
     bag = new Set()
     seen.set(sessionId, bag)
   }
-  if (bag.has(fingerprint)) return false
   bag.add(fingerprint)
-  return true
 }
 
 /** Missing config means the defaults: draft on, GitHub link off. */
@@ -176,31 +178,150 @@ export function classifyTrace(trace: TraceLike): FeedbackKind | undefined {
   if (reason === '' || reason === 'jev is not configured') return undefined
   if (reason === 'no eligible candidate') return 'no-eligible'
   if (reason === 'fewer than 2 candidates' || reason === 'llm service is unavailable') return 'runtime'
-  if (/^jev\b|typesafe|scoring-failed|fetch failed|network|timeout|ECONN|ENOTFOUND/i.test(reason)) return 'jev'
+  // Anchored: a fallback that merely mentions timeout, network, or typesafe stays runtime.
+  if (/^jev\b/i.test(reason) || reason === 'scoring-failed') return 'jev'
   return 'runtime'
 }
 
-/** Replace secret-shaped tokens. The surrounding words stay so the draft is still readable. */
+/**
+ * Replace secret-shaped tokens.
+ * `_` is a word character, so `\b` does not see `API_KEY` inside `TYPESAFE_API_KEY`.
+ * The name may stay; the value does not.
+ */
 export function redactText(input: string): string {
   let text = input
   text = text.replace(/<evidence\b[^>]*>[\s\S]*?<\/evidence\b[^>]*>/gi, '[redacted]')
+  text = text.replace(/(?:\/[\w.@+-]+){2,}/g, '[redacted]')
+  text = text.replace(/[A-Za-z]:\\(?:[^\\\s]+\\)+[^\\\s]+/g, '[redacted]')
   text = text.replace(/\bgithub_pat_[A-Za-z0-9_]{8,}\b/g, '[redacted]')
   text = text.replace(/\bgh[pousr]_[A-Za-z0-9]{8,}\b/g, '[redacted]')
   text = text.replace(/\bxox[baprs]-[A-Za-z0-9-]{8,}\b/g, '[redacted]')
   text = text.replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, '[redacted]')
-  text = text.replace(/\b(?:sk|pk|rk)-[A-Za-z0-9_\-]{8,}\b/g, '[redacted]')
-  text = text.replace(/\bBearer\s+[A-Za-z0-9._\-+/=]{8,}/gi, 'Bearer [redacted]')
+  text = text.replace(/\b(?:sk|pk|rk)-[A-Za-z0-9_\-]{3,}\b/g, '[redacted]')
+  text = text.replace(/\bBearer\s+[A-Za-z0-9._\-+/=]{3,}/gi, 'Bearer [redacted]')
   text = text.replace(
-    /\b(api[_-]?key|apikey|access[_-]?token|token|secret|password|authorization|credential)\b(\s*[:=]\s*)(["']?)[^\s"',}]+/gi,
-    (_match, name: string, sep: string, quote: string) => `${name}${sep}${quote}[redacted]`,
+    /(^|[^A-Za-z0-9])([A-Za-z][A-Za-z0-9_-]*(?:api[_-]?key|apikey|access[_-]?token|token|secret|password|authorization|credential))(\s*[:=]\s*)(["']?)[^\s"',}]+/gi,
+    (_match, lead: string, name: string, sep: string, quote: string) => `${lead}${name}${sep}${quote}[redacted]`,
   )
   return text
 }
 
-function clip(input: string, max: number): string {
+/** Selector and Jev question keys that may appear beside a number or after `missing`. */
+const QUESTION_KEY = [
+  'confidence',
+  'needs_multi_step_work',
+  'violates_constraint_\\d+',
+  'irreversible_without_approval',
+  'addresses_request',
+  'grounded_in_evidence',
+  'verifiable',
+  'scope_risk',
+  'criterion_met_\\d+',
+  'unverified_claims',
+  'claims_supported_by_evidence',
+].join('|')
+
+const EXACT_CODES = new Set([
+  'empty',
+  'not-json',
+  'schema',
+  'aborted',
+  'dropped',
+  'cost-cap',
+  'scoring-failed',
+  'rejected',
+  'generator failed',
+  'generator-failed',
+  'jev failed',
+  'jev is not configured',
+  'no eligible candidate',
+  'fewer than 2 candidates',
+  'llm service is unavailable',
+  'missing answer',
+  'gate-failed',
+  'intake-gate',
+  'attachment',
+  'command',
+  'trivial',
+  'single-step',
+  'unknown',
+  'unstructured',
+  'passed',
+  'skipped',
+  'desktop-profile-managed',
+  'route-linked',
+  'plugin-install',
+])
+
+/**
+ * Keep a known code. Free text, including a prompt or a title inside a provider
+ * error, becomes `unstructured` instead of a clipped copy.
+ */
+export function sanitizeCode(input: string, depth = 0): string {
   const flat = redactText(input).replace(/\s+/g, ' ').trim()
-  if (flat.length <= max) return flat
-  return `${flat.slice(0, max)}…`
+  if (flat === '') return ''
+  if (EXACT_CODES.has(flat)) return flat
+  if (depth > 2) return 'unstructured'
+  const jevStatus = /^jev (\d{3})\b/i.exec(flat)
+  if (jevStatus !== null) return `jev ${jevStatus[1]}`
+  if (/^jev failed\b/i.test(flat)) return 'jev failed'
+  const gate = /^gate-failed:\s*(.*)$/i.exec(flat)
+  if (gate !== null) {
+    const detail = sanitizeCode(gate[1] ?? '', depth + 1)
+    if (detail === '' || detail === 'unstructured') return 'gate-failed'
+    return `gate-failed: ${detail}`
+  }
+  const missing = new RegExp(`^missing (${QUESTION_KEY})$`).exec(flat)
+  if (missing !== null) return `missing ${missing[1]}`
+  const scored = new RegExp(`^(${QUESTION_KEY}) (\\d+(?:\\.\\d+)?)$`).exec(flat)
+  if (scored !== null) return `${scored[1]} ${scored[2]}`
+  const nodeCode = /^(?:E[A-Z][A-Z0-9]{2,24}|ERR_[A-Z0-9_]{3,40})$/.exec(flat)
+  if (nodeCode !== null) return nodeCode[0]
+  if (/^[A-Z][A-Za-z]*Error$/.test(flat) || flat === 'Error') return flat
+  const named = /^([A-Za-z]*Error):\s+(.+)$/.exec(flat)
+  if (named !== null) {
+    const inner = sanitizeCode(named[2] ?? '', depth + 1)
+    if (inner !== '' && inner !== 'unstructured') return `${named[1]}: ${inner}`
+    return named[1] ?? 'Error'
+  }
+  return 'unstructured'
+}
+
+const POINTS = new Set(['intake', 'audit', 'plan', 'gate', 'load', 'runtime', 'ledger', 'install'])
+const OUTCOMES = new Set(['committed', 'fallback', 'cost-cap', 'plan-score', 'steered', 'incomplete', 'passed', 'skipped', 'error'])
+const PLATFORMS = new Set(['desktop', 'web', 'cli', 'headless', 'unknown'])
+const SCOPES = new Set(['design', 'generator_jev_only'])
+
+function allow(value: string | undefined, permitted: ReadonlySet<string>, fallback = ''): string {
+  if (value === undefined) return fallback
+  return permitted.has(value) ? value : fallback
+}
+
+function allowCounted(value: string | undefined): string {
+  if (value === undefined || value === '') return ''
+  if (/^(?:generator|jev|post-steer)(?:\+(?:generator|jev|post-steer)){0,3}$/.test(value)) return value
+  return ''
+}
+
+function allowModel(value: string | undefined): string {
+  if (value === undefined || value === '') return ''
+  if (/^[A-Za-z0-9_.@+-]+(?:\/[A-Za-z0-9_.@+-]+)?$/.test(value)) return value
+  return ''
+}
+
+function allowStrategy(value: string | undefined): string {
+  if (value !== undefined && /^[a-z0-9][a-z0-9-]{0,40}$/.test(value)) return value
+  return 'candidate'
+}
+
+/** Short code for a load failure. Paths in the message are not copied. */
+export function loadFailureCode(message: string): string | undefined {
+  if (/ERR_UNKNOWN_FILE_EXTENSION|Unknown file extension/i.test(message)) return 'ERR_UNKNOWN_FILE_EXTENSION'
+  if (/ERR_MODULE_NOT_FOUND|Cannot find module|cannot find module/i.test(message)) return 'ERR_MODULE_NOT_FOUND'
+  if (/managed exclusively by the Electron/i.test(message)) return 'desktop-profile-managed'
+  if (/routeLinked/i.test(message)) return 'route-linked'
+  if (/dsh plugin|plugin add|profiles\/desktop|dsh-verifier-mode-.*\.tgz|file:\/tmp\/dsh-verifier/i.test(message)) return 'plugin-install'
+  return undefined
 }
 
 function finite(value: number | undefined): number | undefined {
@@ -256,16 +377,17 @@ export function githubNewIssueUrl(title: string, body: string): string {
   }
   const full = build(body)
   if (full.length <= MAX_ISSUE_URL) return full
-  return build('正文超过链接长度。请从会话通知复制 Markdown 草稿后提交。')
+  return build('正文超过链接长度。请从通知复制草稿。')
 }
 
 function scoreLines(scores: readonly FeedbackScore[]): string[] {
   return scores.slice(0, MAX_ROWS).map((row) => {
-    const bits = [clip(row.strategy || 'candidate', MAX_FIELD)]
+    const bits = [allowStrategy(row.strategy)]
     if (row.eligible !== undefined) bits.push(`eligible=${row.eligible}`)
     if (finite(row.composite) !== undefined) bits.push(`composite=${row.composite!.toFixed(2)}`)
     if (finite(row.confidence) !== undefined) bits.push(`confidence=${row.confidence!.toFixed(2)}`)
-    if (row.dropReason !== undefined && row.dropReason !== '') bits.push(`drop=${clip(row.dropReason, MAX_DROP)}`)
+    const drop = sanitizeCode(row.dropReason ?? '')
+    if (drop !== '') bits.push(`drop=${drop}`)
     return `- ${bits.join(' ')}`
   })
 }
@@ -273,10 +395,9 @@ function scoreLines(scores: readonly FeedbackScore[]): string[] {
 function uniqueDrops(facts: FeedbackFacts): string[] {
   const found: string[] = []
   const push = (value: string | undefined): void => {
-    if (value === undefined || value.trim() === '') return
-    const redacted = clip(value, MAX_DROP)
-    if (redacted === '' || found.includes(redacted) || found.length >= MAX_ROWS) return
-    found.push(redacted)
+    const code = sanitizeCode(value ?? '')
+    if (code === '' || found.includes(code) || found.length >= MAX_ROWS) return
+    found.push(code)
   }
   for (const reason of facts.dropReasons ?? []) push(reason)
   for (const score of facts.scores ?? []) push(score.dropReason)
@@ -286,13 +407,13 @@ function uniqueDrops(facts: FeedbackFacts): string[] {
 /** Build a draft from allowlisted facts. Extra properties on the object are not read. */
 export function buildIssueDraft(facts: FeedbackFacts): IssueDraft {
   const kind = KINDS.has(facts.kind) ? facts.kind : 'runtime'
-  const point = clip(facts.point ?? '', MAX_FIELD)
-  const outcome = clip(facts.outcome ?? '', MAX_FIELD)
-  const reason = clip(facts.reason ?? '', MAX_REASON)
-  const platform = clip(facts.platform && facts.platform !== '' ? facts.platform : 'unknown', MAX_FIELD)
-  const costScope = clip(facts.costScope ?? '', MAX_FIELD)
-  const countedSources = clip(facts.countedSources ?? '', MAX_FIELD)
-  const capModel = clip(facts.capModel ?? '', MAX_FIELD)
+  const point = allow(facts.point, POINTS)
+  const outcome = allow(facts.outcome, OUTCOMES)
+  const reason = sanitizeCode(facts.reason ?? '')
+  const platform = allow(facts.platform, PLATFORMS, 'unknown')
+  const costScope = allow(facts.costScope, SCOPES)
+  const countedSources = allowCounted(facts.countedSources)
+  const capModel = allowModel(facts.capModel)
   const drops = uniqueDrops(facts)
   const scores = scoreLines(facts.scores ?? [])
   const spent = money(facts.spentCny)
@@ -311,7 +432,7 @@ export function buildIssueDraft(facts: FeedbackFacts): IssueDraft {
   const lines = [
     '### 发布初期反馈',
     '',
-    `请把本草稿提交到 \`${FEEDBACK_REPO}\` 的 Issues 页面。插件只生成草稿。`,
+    '本草稿供复制粘贴。',
     '',
     `- plugin: ${PLUGIN_NAME}@${PLUGIN_VERSION}`,
     `- repo: ${FEEDBACK_REPO}`,
@@ -337,15 +458,20 @@ export function buildIssueDraft(facts: FeedbackFacts): IssueDraft {
   return { title, body, fingerprint, url: githubNewIssueUrl(title, body) }
 }
 
+export interface PreparedNotice {
+  fingerprint: string
+  text: string
+}
+
 export function formatFeedbackNotice(draft: IssueDraft, settings: FeedbackSettings): string | undefined {
   if (!settings.enabled) return undefined
   const lines = [
-    `${FEEDBACK_MARK} 请复制下面的 Markdown 草稿，到 ${FEEDBACK_REPO} 手动提交 issue。`,
+    `${FEEDBACK_MARK} 可复制的问题草稿，供用户粘贴。`,
     '',
     draft.body,
   ]
   if (settings.autoOpenGithub) {
-    lines.push('', `打开预填 issue：${draft.url}`)
+    lines.push('', `预填链接：${draft.url}`)
   }
   return lines.join('\n')
 }
@@ -388,42 +514,85 @@ function factsFromTrace(
   }
 }
 
+export interface NoticeExtra {
+  platform?: string
+  costScope?: string
+  countedSources?: string
+  point?: string
+}
+
 /**
- * Notice text for one decision, or undefined when feedback is off, the
- * decision is not reportable, or this fingerprint was already shown.
+ * Draft text for one decision. Does not record the fingerprint.
+ * Undefined when feedback is off, the decision is not reportable, or this
+ * fingerprint was already handed off.
  */
-export function noticeTextForTrace(
+export function prepareNoticeForTrace(
   sessionId: string,
   settings: FeedbackSettings,
   trace: TraceLike,
-  extra?: { platform?: string; costScope?: string; countedSources?: string },
-): string | undefined {
+  extra?: NoticeExtra,
+): PreparedNotice | undefined {
   if (!settings.enabled) return undefined
   const kind = classifyTrace(trace)
   if (kind === undefined) return undefined
   const draft = buildIssueDraft(factsFromTrace(trace, kind, extra))
-  if (!claimFeedback(sessionId, draft.fingerprint)) return undefined
-  return formatFeedbackNotice(draft, settings)
+  if (remembered(sessionId, draft.fingerprint)) return undefined
+  const text = formatFeedbackNotice(draft, settings)
+  if (text === undefined) return undefined
+  return { fingerprint: draft.fingerprint, text }
 }
 
-/** Notice text for a thrown error. Stack frames are not copied. */
-export function noticeTextForError(
+/** Records the fingerprint, then returns the notice. */
+export function noticeTextForTrace(
   sessionId: string,
   settings: FeedbackSettings,
-  error: unknown,
-  extra?: { platform?: string; point?: string },
+  trace: TraceLike,
+  extra?: NoticeExtra,
 ): string | undefined {
-  if (!settings.enabled) return undefined
+  const prepared = prepareNoticeForTrace(sessionId, settings, trace, extra)
+  if (prepared === undefined) return undefined
+  commitFeedback(sessionId, prepared.fingerprint)
+  return prepared.text
+}
+
+function errorFacts(error: unknown, extra?: NoticeExtra): FeedbackFacts {
   const message = error instanceof Error ? error.message : typeof error === 'string' ? error : 'unknown'
   const name = error instanceof Error ? error.name : 'Error'
   const loaded = classifyLoadError(message)
-  const draft = buildIssueDraft({
+  const code = loadFailureCode(message)
+  return {
     kind: loaded ?? 'runtime',
     platform: extra?.platform,
     point: extra?.point ?? (loaded === undefined ? 'runtime' : 'load'),
     outcome: 'error',
-    reason: `${name}: ${message}`,
-  })
-  if (!claimFeedback(sessionId, draft.fingerprint)) return undefined
-  return formatFeedbackNotice(draft, settings)
+    reason: code ?? sanitizeCode(`${name}: ${message}`),
+  }
+}
+
+/** Draft text for a thrown error. Stack frames are not copied. Does not record the fingerprint. */
+export function prepareNoticeForError(
+  sessionId: string,
+  settings: FeedbackSettings,
+  error: unknown,
+  extra?: NoticeExtra,
+): PreparedNotice | undefined {
+  if (!settings.enabled) return undefined
+  const draft = buildIssueDraft(errorFacts(error, extra))
+  if (remembered(sessionId, draft.fingerprint)) return undefined
+  const text = formatFeedbackNotice(draft, settings)
+  if (text === undefined) return undefined
+  return { fingerprint: draft.fingerprint, text }
+}
+
+/** Records the fingerprint, then returns the notice. */
+export function noticeTextForError(
+  sessionId: string,
+  settings: FeedbackSettings,
+  error: unknown,
+  extra?: NoticeExtra,
+): string | undefined {
+  const prepared = prepareNoticeForError(sessionId, settings, error, extra)
+  if (prepared === undefined) return undefined
+  commitFeedback(sessionId, prepared.fingerprint)
+  return prepared.text
 }

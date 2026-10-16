@@ -21,13 +21,16 @@ import {
   buildIssueDraft,
   classifyLoadError,
   classifyTrace,
+  commitFeedback,
   detectPlatform,
   githubNewIssueUrl,
   noticeTextForError,
   noticeTextForTrace,
+  prepareNoticeForTrace,
   redactText,
   resetFeedbackDedupe,
   resolveFeedback,
+  sanitizeCode,
 } from '../src/feedback.ts'
 import type { FeedbackFacts, TraceLike } from '../src/feedback.ts'
 
@@ -116,9 +119,39 @@ describe('redaction', () => {
     expect(rendered).not.toContain(PROMPT)
     expect(rendered).not.toContain(TRANSCRIPT)
     expect(rendered).not.toContain('secret message body')
-    expect(rendered).toContain('[redacted]')
+    expect(rendered).toContain('reason: jev 500')
+    expect(rendered).toContain('- unstructured')
+    expect(rendered).not.toContain('Bearer')
+    expect(rendered).not.toContain('api_key')
     expect(redactText(`github_pat_${'a'.repeat(20)}`)).toBe('[redacted]')
     expect(redactText('eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signatureok')).toBe('[redacted]')
+    expect(redactText('sk-abc')).toBe('[redacted]')
+    expect(redactText('TYPESAFE_API_KEY=super-secret-value')).toBe('TYPESAFE_API_KEY=[redacted]')
+    expect(redactText('prefix TYPESAFE_API_KEY=super-secret-value tail')).toBe('prefix TYPESAFE_API_KEY=[redacted] tail')
+  })
+
+  it('keeps known codes and drops prompt-like free text', () => {
+    expect(sanitizeCode('confidence 0.22')).toBe('confidence 0.22')
+    expect(sanitizeCode('violates_constraint_0 0.9')).toBe('violates_constraint_0 0.9')
+    expect(sanitizeCode('missing addresses_request')).toBe('missing addresses_request')
+    expect(sanitizeCode('empty')).toBe('empty')
+    expect(sanitizeCode(`password 12345 ${PROMPT}`)).toBe('unstructured')
+    expect(sanitizeCode(`generator failed: ${PROMPT} TYPESAFE_API_KEY=super-secret-value`)).toBe('unstructured')
+    const draft = buildIssueDraft({
+      kind: 'runtime',
+      point: 'intake',
+      outcome: 'fallback',
+      reason: 'fewer than 2 candidates',
+      dropReasons: [`${PROMPT} TYPESAFE_API_KEY=super-secret-value`, 'empty'],
+      scores: [{ strategy: 'bold', title: PROMPT, dropReason: `title: ${PROMPT}` }],
+    })
+    expect(draft.body).toContain('reason: fewer than 2 candidates')
+    expect(draft.body).toContain('- empty')
+    expect(draft.body).toContain('- unstructured')
+    expect(draft.body).toContain('drop=unstructured')
+    expect(draft.body).not.toContain(PROMPT)
+    expect(draft.body).not.toContain('super-secret-value')
+    expect(draft.body).not.toContain('TYPESAFE_API_KEY')
   })
 
   it('omits candidate titles and stack frames', () => {
@@ -127,7 +160,31 @@ describe('redaction', () => {
     const text = noticeTextForError('stack-session', FEEDBACK_DEFAULTS, error, { platform: 'desktop', point: 'load' })
     expect(text).not.toContain(SECRET)
     expect(text).not.toContain('credentials.js')
+    expect(text).not.toContain('/home/secret')
     expect(text).not.toContain(PROMPT)
+    expect(text).toContain('reason: Error')
+
+    const imported = noticeTextForError(
+      'import-session',
+      FEEDBACK_DEFAULTS,
+      new Error('Cannot find module /home/alice/Library/Application Support/dsh/plugins/dsh-verifier-mode/lib/index.ts'),
+      { platform: 'desktop', point: 'load' },
+    )
+    expect(imported).toContain('kind: desktop-import')
+    expect(imported).toContain('reason: ERR_MODULE_NOT_FOUND')
+    expect(imported).not.toContain('/home/alice')
+    expect(imported).not.toContain('Library')
+
+    const install = noticeTextForError(
+      'install-session',
+      FEEDBACK_DEFAULTS,
+      new Error('dsh plugin add file:/tmp/dsh-verifier-mode-pack.tgz from /home/alice/src'),
+      { platform: 'desktop', point: 'install' },
+    )
+    expect(install).toContain('kind: install')
+    expect(install).toContain('reason: plugin-install')
+    expect(install).not.toContain('/home/alice')
+    expect(install).not.toContain('/tmp/')
 
     const notice = noticeTextForTrace('title-session', FEEDBACK_DEFAULTS, reportable, {
       platform: 'web',
@@ -175,8 +232,10 @@ describe('draft contents', () => {
     expect(draft.body).toContain('- empty')
     expect(draft.body).toContain('#### 分数摘要')
     expect(draft.body).toContain('conservative eligible=false composite=0.40 confidence=0.22')
+    expect(draft.body).toContain('供复制粘贴')
     expect(draft.body).not.toContain('gh issue create')
     expect(draft.body).not.toContain('https://github.com')
+    expect(draft.body).not.toContain('手动提交')
 
     const url = new URL(draft.url)
     expect(url.hostname).toBe('github.com')
@@ -191,6 +250,9 @@ describe('draft contents', () => {
       costScope: 'design',
     })
     expect(copied).toContain(FEEDBACK_MARK)
+    expect(copied).toContain('供用户粘贴')
+    expect(copied).not.toContain('手动提交')
+    expect(copied).not.toContain('提交 issue')
     expect(copied).toContain('#### 分数摘要')
     expect(copied).toContain('conservative eligible=false composite=0.40 confidence=0.22')
     expect(copied).toContain('费用范围: design')
@@ -202,7 +264,7 @@ describe('draft contents', () => {
       platform: 'desktop',
       costScope: 'design',
     })
-    const url = new URL(linked?.split('打开预填 issue：')[1] ?? '')
+    const url = new URL(linked?.split('预填链接：')[1] ?? '')
     expect(url.pathname).toBe(`/${FEEDBACK_REPO}/issues/new`)
     expect(url.searchParams.get('title')).toContain('no eligible candidate')
     expect(url.searchParams.get('body')).toContain('分数摘要')
@@ -213,7 +275,7 @@ describe('draft contents', () => {
     const url = githubNewIssueUrl('title', 'x'.repeat(8_000))
     expect(url.length).toBeLessThanOrEqual(6_000)
     expect(url).toContain(`/${FEEDBACK_REPO}/issues/new`)
-    expect(new URL(url).searchParams.get('body')).toContain('请从会话通知复制')
+    expect(new URL(url).searchParams.get('body')).toContain('请从通知复制草稿')
   })
 
   it('classifies the failures that should become a draft', () => {
@@ -225,6 +287,9 @@ describe('draft contents', () => {
     expect(classifyTrace({ point: 'intake', outcome: 'fallback', reason: 'no eligible candidate' })).toBe('no-eligible')
     expect(classifyTrace({ point: 'intake', outcome: 'fallback', reason: 'fewer than 2 candidates' })).toBe('runtime')
     expect(classifyTrace({ point: 'intake', outcome: 'fallback', reason: 'jev 500' })).toBe('jev')
+    expect(classifyTrace({ point: 'audit', outcome: 'fallback', reason: 'scoring-failed' })).toBe('jev')
+    expect(classifyTrace({ point: 'intake', outcome: 'fallback', reason: 'the network timed out talking to typesafe' })).toBe('runtime')
+    expect(classifyTrace({ point: 'intake', outcome: 'fallback', reason: 'request timeout while scoring' })).toBe('runtime')
     expect(classifyTrace({ point: 'audit', outcome: 'cost-cap', countedSources: 'generator+jev+post-steer' })).toBe('cost-pause')
     expect(classifyTrace({ point: 'intake', outcome: 'committed' })).toBeUndefined()
     expect(classifyLoadError('Cannot find module ./lib/index.ts ERR_UNKNOWN_FILE_EXTENSION')).toBe('desktop-import')
@@ -261,7 +326,19 @@ describe('dedupe', () => {
     const left = buildIssueDraft({ kind: 'runtime', point: 'intake', outcome: 'error', reason: `failed ${SECRET}` })
     const right = buildIssueDraft({ kind: 'runtime', point: 'intake', outcome: 'error', reason: 'failed sk-other-secret-value-999' })
     expect(left.fingerprint).toBe(right.fingerprint)
+    expect(left.body).toContain('reason: unstructured')
     expect(left.body).not.toContain(SECRET)
+    expect(right.body).not.toContain('sk-other')
+  })
+
+  it('keeps the fingerprint unclaimed until the notice is committed', () => {
+    const first = prepareNoticeForTrace('race', FEEDBACK_DEFAULTS, reportable, { platform: 'desktop', costScope: 'design' })
+    const second = prepareNoticeForTrace('race', FEEDBACK_DEFAULTS, reportable, { platform: 'desktop', costScope: 'design' })
+    expect(first?.text).toContain(FEEDBACK_MARK)
+    expect(second?.text).toContain(FEEDBACK_MARK)
+    expect(first?.fingerprint).toBe(second?.fingerprint)
+    commitFeedback('race', first?.fingerprint ?? '')
+    expect(prepareNoticeForTrace('race', FEEDBACK_DEFAULTS, reportable, { platform: 'desktop', costScope: 'design' })).toBeUndefined()
   })
 
   it('does not consume the fingerprint while feedback is off', () => {
@@ -419,6 +496,10 @@ describe('readme', () => {
     expect(readme).toContain('feedback.autoOpenGithub')
     expect(readme).toContain('gh issue create')
     expect(readme).toContain(FEEDBACK_REPO)
+    expect(readme).toContain('stderr')
+    expect(readme).toContain('apply()')
+    expect(readme).toContain('dsh: verifier feedback')
+    expect(readme).toContain('请复制正文，或只打开这条链接')
     const sources = ['../src/feedback.ts', '../src/runtime.ts', '../src/index.ts']
       .map(path => readFileSync(new URL(path, import.meta.url), 'utf8'))
       .join('\n')

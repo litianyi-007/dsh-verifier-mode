@@ -31,7 +31,7 @@ import {
   postJev,
 } from './jev.ts'
 import type { JevResponse } from './jev.ts'
-import { detectPlatform, noticeTextForError, noticeTextForTrace } from './feedback.ts'
+import { commitFeedback, detectPlatform, prepareNoticeForError, prepareNoticeForTrace, sanitizeCode } from './feedback.ts'
 import {
   costCapNotice,
   costResumeNotice,
@@ -68,19 +68,25 @@ const postSteer = new Set<string>()
 /** Greetings, slash commands, and other deterministic trivial skips. D4 does not spend a Jev call. A failed or single-step gate still audits. */
 const skipAudit = new Set<string>()
 
-/** One redacted draft notice, or nothing when the event is not reportable or already shown. */
-function feedbackTail(sessionId: string, config: ResolvedConfig, trace: DecisionTrace): UserMessage[] {
+interface TakenFeedback {
+  fingerprint: string
+  message: UserMessage
+}
+
+/** Draft only. The caller records the fingerprint after a successful handoff. */
+function takeFeedback(sessionId: string, config: ResolvedConfig, trace: DecisionTrace): TakenFeedback | undefined {
   try {
-    const text = noticeTextForTrace(sessionId, config.feedback, trace, {
+    const prepared = prepareNoticeForTrace(sessionId, config.feedback, trace, {
       platform: detectPlatform(),
       costScope: config.cost.scope,
       countedSources: trace.countedSources ?? countedSourceLabel(config.cost.scope),
     })
-    return text === undefined ? [] : [feedbackNotice(text)]
+    if (prepared === undefined) return undefined
+    return { fingerprint: prepared.fingerprint, message: feedbackNotice(prepared.text) }
   } catch (error) {
     const message = error instanceof Error ? error.message : 'feedback failed'
-    process.stderr.write(`dsh: verifier feedback failed: ${message}\n`)
-    return []
+    process.stderr.write(`dsh: verifier feedback failed: ${sanitizeCode(message) || 'feedback-failed'}\n`)
+    return undefined
   }
 }
 
@@ -90,36 +96,41 @@ function withFeedback(
   trace: DecisionTrace,
   messages: readonly UserMessage[],
 ): UserMessage[] {
-  return [...messages, ...feedbackTail(sessionId, config, trace)]
+  const taken = takeFeedback(sessionId, config, trace)
+  if (taken === undefined) return [...messages]
+  commitFeedback(sessionId, taken.fingerprint)
+  return [...messages, taken.message]
 }
 
 function appendSessionFeedback(agent: Agent, sessionId: string, config: ResolvedConfig, trace: DecisionTrace): void {
-  for (const message of feedbackTail(sessionId, config, trace)) {
-    try {
-      agent.session.append('user/message', message, { surfaceOp: 'append' })
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : 'append failed'
-      process.stderr.write(`dsh: verifier feedback failed: ${detail}\n`)
-    }
+  const taken = takeFeedback(sessionId, config, trace)
+  if (taken === undefined) return
+  try {
+    agent.session.append('user/message', taken.message, { surfaceOp: 'append' })
+    commitFeedback(sessionId, taken.fingerprint)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : 'append failed'
+    process.stderr.write(`dsh: verifier feedback failed: ${sanitizeCode(detail) || 'append-failed'}\n`)
   }
 }
 
-/** Draft for a thrown failure that never reached a decision trace. */
+/** Draft for a thrown failure. The fingerprint stays unrecorded until the caller commits it. */
 export function feedbackForThrown(
   sessionId: string,
   config: ResolvedConfig,
   error: unknown,
   point?: string,
-): UserMessage[] {
+): TakenFeedback[] {
   try {
-    const text = noticeTextForError(sessionId, config.feedback, error, {
+    const prepared = prepareNoticeForError(sessionId, config.feedback, error, {
       platform: detectPlatform(),
       point,
     })
-    return text === undefined ? [] : [feedbackNotice(text)]
+    if (prepared === undefined) return []
+    return [{ fingerprint: prepared.fingerprint, message: feedbackNotice(prepared.text) }]
   } catch (caught) {
     const message = caught instanceof Error ? caught.message : 'feedback failed'
-    process.stderr.write(`dsh: verifier feedback failed: ${message}\n`)
+    process.stderr.write(`dsh: verifier feedback failed: ${sanitizeCode(message) || 'feedback-failed'}\n`)
     return []
   }
 }
@@ -304,7 +315,7 @@ async function generateCandidates(
     } catch (error) {
       const reason = limiter.signal.aborted && !signal.aborted
         ? 'aborted'
-        : (error instanceof Error ? error.message : 'generator failed')
+        : sanitizeCode(error instanceof Error ? error.message : 'generator failed') || 'generator-failed'
       if (reason !== 'aborted') {
         process.stderr.write(`dsh: verifier dropped candidate strategy=${strategy} reason=${reason}\n`)
       }
