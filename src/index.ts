@@ -4,11 +4,13 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 import { Config, resolveConfig } from './config.ts'
+import type { ResolvedConfig } from './config.ts'
+import { FEEDBACK_DEFAULTS, commitFeedback, detectPlatform, prepareNoticeForError } from './feedback.ts'
 import { ledgerProjectionDefinition } from './ledger.ts'
 import { fallbackNotice, verifierModeNotice } from './notices.ts'
 import { createVerifierProjection } from './projection.ts'
 import { routeProjectionDefinition } from './route.ts'
-import { billAssistantUsage, postSteerArmed, runAudit, runIntake, scorePlan, takePlanNote } from './runtime.ts'
+import { billAssistantUsage, feedbackForThrown, postSteerArmed, runAudit, runIntake, scorePlan, takePlanNotes } from './runtime.ts'
 import { ensureUsageStore, sessionKey, watchUsageStore } from './cost-book.ts'
 import { judgeProjectionDefinition } from './summary.ts'
 
@@ -25,6 +27,17 @@ function parseMode(rawInput: string): 'on' | 'off' | 'status' | 'once' | 'invali
   return 'invalid'
 }
 
+function reportLoadFailure(settings: ResolvedConfig['feedback'], error: unknown): void {
+  try {
+    const prepared = prepareNoticeForError('plugin-load', settings, error, { platform: detectPlatform(), point: 'load' })
+    if (prepared === undefined) return
+    process.stderr.write(`dsh: verifier feedback\n${prepared.text}\n`)
+    commitFeedback('plugin-load', prepared.fingerprint)
+  } catch {
+    // The original failure is rethrown. An unwritten draft stays unclaimed.
+  }
+}
+
 /**
  * Register projections, `/verifier`, and the decision listeners.
  * @param ctx - requires `commands` and `sessionProjections`. `planMode` and `storageDomain` are optional.
@@ -32,6 +45,21 @@ function parseMode(rawInput: string): 'on' | 'off' | 'status' | 'once' | 'invali
  */
 export async function apply(ctx: Context, config: unknown = { enabledByDefault: false }): Promise<void> {
   const readConfig = () => resolveConfig(config)
+  try {
+    await applyPlugin(ctx, readConfig)
+  } catch (error) {
+    let settings: ResolvedConfig['feedback'] = FEEDBACK_DEFAULTS
+    try {
+      settings = readConfig().feedback
+    } catch {
+      // Config itself failed. The draft still uses the defaults.
+    }
+    reportLoadFailure(settings, error)
+    throw error
+  }
+}
+
+async function applyPlugin(ctx: Context, readConfig: () => ResolvedConfig): Promise<void> {
   await ensureUsageStore(ctx)
   watchUsageStore(ctx)
   ctx.sessionProjections.register(createVerifierProjection(() => readConfig().enabledByDefault))
@@ -50,6 +78,14 @@ export async function apply(ctx: Context, config: unknown = { enabledByDefault: 
     void billAssistantUsage(id, source.provider, source.model, usage, config.pricing).catch((error: unknown) => {
       const message = error instanceof Error ? error.message : 'unknown'
       process.stderr.write(`dsh: verifier cost ledger write failed: ${message}\n`)
+      for (const note of feedbackForThrown(id, config, error, 'ledger')) {
+        try {
+          session.append('user/message', note.message, { surfaceOp: 'append' })
+          commitFeedback(id, note.fingerprint)
+        } catch {
+          process.stderr.write('dsh: verifier feedback notice could not be appended\n')
+        }
+      }
     })
   })
 
@@ -60,15 +96,35 @@ export async function apply(ctx: Context, config: unknown = { enabledByDefault: 
       return await runIntake(ctx, readConfig(), payload.agent, payload.turn, payload.signal, decision)
     } catch (error) {
       const reason = error instanceof Error ? error.message : 'intake failed'
-      return { ...decision, messages: [...decision.messages, fallbackNotice(reason)] }
+      const resolved = readConfig()
+      const sessionId = sessionKey(payload.agent.session.id)
+      const notes = feedbackForThrown(sessionId, resolved, error, 'intake')
+      for (const note of notes) commitFeedback(sessionId, note.fingerprint)
+      return {
+        ...decision,
+        messages: [
+          ...decision.messages,
+          fallbackNotice(reason),
+          ...notes.map(note => note.message),
+        ],
+      }
     }
   })
 
   ctx.on('agent/turn-stopping', async (payload) => {
     try {
       await runAudit(ctx, readConfig(), payload.agent, payload.turn, payload.signal)
-    } catch {
-      // Judge failures leave the turn on the normal path.
+    } catch (error) {
+      // Judge failures leave the turn on the normal path. The draft is separate.
+      const sessionId = sessionKey(payload.agent.session.id)
+      for (const note of feedbackForThrown(sessionId, readConfig(), error, 'audit')) {
+        try {
+          payload.agent.session.append('user/message', note.message, { surfaceOp: 'append' })
+          commitFeedback(sessionId, note.fingerprint)
+        } catch {
+          process.stderr.write('dsh: verifier feedback notice could not be appended\n')
+        }
+      }
     }
   })
 
@@ -79,10 +135,20 @@ export async function apply(ctx: Context, config: unknown = { enabledByDefault: 
       && typeof exec.arguments.plan === 'string'
       ? exec.arguments.plan
       : ''
+    const agent = exec.agent
     try {
-      await scorePlan(ctx, readConfig(), exec.agent, String(exec.callId), plan, exec.signal)
-    } catch {
+      await scorePlan(ctx, readConfig(), agent, String(exec.callId), plan, exec.signal)
+    } catch (error) {
       // Advice is optional. The tool decision is unchanged.
+      const sessionId = sessionKey(agent.session.id)
+      for (const note of feedbackForThrown(sessionId, readConfig(), error, 'plan')) {
+        try {
+          agent.session.append('user/message', note.message, { surfaceOp: 'append' })
+          commitFeedback(sessionId, note.fingerprint)
+        } catch {
+          process.stderr.write('dsh: verifier feedback notice could not be appended\n')
+        }
+      }
     }
     return decision
   })
@@ -90,9 +156,9 @@ export async function apply(ctx: Context, config: unknown = { enabledByDefault: 
   ctx.on('tools/post-execute', async (exec, _result, next) => {
     const decision = await next()
     if (exec.name !== 'exit_plan_mode') return decision
-    const note = takePlanNote(String(exec.callId))
-    if (note === undefined || (decision.kind !== 'accept' && decision.kind !== 'block')) return decision
-    return { ...decision, additionalContexts: [...(decision.additionalContexts ?? []), note] }
+    const notes = takePlanNotes(String(exec.callId))
+    if (notes.length === 0 || (decision.kind !== 'accept' && decision.kind !== 'block')) return decision
+    return { ...decision, additionalContexts: [...(decision.additionalContexts ?? []), ...notes] }
   })
 
   ctx.commands.register({

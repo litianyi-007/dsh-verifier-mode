@@ -88,6 +88,9 @@ export function renderSettingsForm(props: SettingsFormProps): ReactNode {
   const intake = readBoolean(value.intake, true)
   const gate = value.intakeGate === 'always' ? 'always' : 'gated'
   const audit = readBoolean(value.audit, true)
+  const feedback = asRecord(value.feedback)
+  const feedbackEnabled = readBoolean(feedback.enabled, true)
+  const feedbackAutoOpen = readBoolean(feedback.autoOpenGithub, false)
   const scope = cost.scope === 'generator_jev_only' ? 'generator_jev_only' : 'design'
   const flash = readNumber(byModel[FLASH_ROUTE], 1)
   const pro = readNumber(byModel[PRO_ROUTE], 4)
@@ -138,6 +141,28 @@ export function renderSettingsForm(props: SettingsFormProps): ReactNode {
         checked: audit,
         disabled: !writable,
         onChange: (event: ChangeEvent<HTMLInputElement>) => { write(['audit'], event.target.checked) },
+      }),
+    ),
+    field(
+      props.t('cfg.feedback.label'),
+      props.t('cfg.feedback.help'),
+      createElement('input', {
+        type: 'checkbox',
+        'aria-label': props.t('cfg.feedback.label'),
+        checked: feedbackEnabled,
+        disabled: !writable,
+        onChange: (event: ChangeEvent<HTMLInputElement>) => { write(['feedback', 'enabled'], event.target.checked) },
+      }),
+    ),
+    field(
+      props.t('cfg.feedbackOpen.label'),
+      props.t('cfg.feedbackOpen.help'),
+      createElement('input', {
+        type: 'checkbox',
+        'aria-label': props.t('cfg.feedbackOpen.label'),
+        checked: feedbackAutoOpen,
+        disabled: !writable,
+        onChange: (event: ChangeEvent<HTMLInputElement>) => { write(['feedback', 'autoOpenGithub'], event.target.checked) },
       }),
     ),
     createElement(

@@ -96,6 +96,11 @@ export function steerNotice(failed: readonly string[]): UserMessage {
   )
 }
 
+/** Copyable early-release draft. `text` is already redacted. */
+export function feedbackNotice(text: string): UserMessage {
+  return verifierNotice(text, 'verifier feedback draft')
+}
+
 export function incompleteNotice(failed: readonly string[]): UserMessage {
   return verifierNotice(
     `[verifier incomplete] still unmet after one steer: ${failed.join(', ')}`,

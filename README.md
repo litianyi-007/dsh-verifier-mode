@@ -85,8 +85,18 @@ From inside the checkout, that is `dsh plugin --profile web add .`
 
 That command is the profile install in the DeepSeek Harness guide, [Package and install a plugin](https://github.com/deepseek-ai/deepseek-harness/blob/5badb15009ae1756c3afe0ae0cef1faafc290ccc/docs/user/develop/basic/publish.md#install-into-a-profile). The guide's example is `dsh plugin --profile demo add ./hello-plugin`. Then start the Web UI with `dsh web`.
 
-The DeepSeek key is set on Settings → Models. Plugins → dsh-verifier-mode → Configure sets the TypeSafe key and the live knobs: candidate count K (2–5, default 3), the CNY per-session caps (flash default ¥1, pro default ¥4; `tokenbox/deepseek-flash` and the old `deepseek-v4-flash` name use the flash tier), which sources count toward that cap (design A by default: candidates, every Jev call, and main steps after a D4 steer; ordinary main-loop usage does not), the intake gate (automatic by default, or always-on for debugging), and the D4 audit switch. That page is there only after this plugin is installed.
+The DeepSeek key is set on Settings → Models. Plugins → dsh-verifier-mode → Configure sets the TypeSafe key and the live knobs: candidate count K (2–5, default 3), the CNY per-session caps (flash default ¥1, pro default ¥4; `tokenbox/deepseek-flash` and the old `deepseek-v4-flash` name use the flash tier), which sources count toward that cap (design A by default: candidates, every Jev call, and main steps after a D4 steer; ordinary main-loop usage does not), the intake gate (automatic by default, or always-on for debugging), the D4 audit switch, and the early-release feedback switches. That page is there only after this plugin is installed.
 
 Decision traces and the cost ledger share the `verifier_trace` storage-domain sidecar (`usage` and `traces` tables). The process Map is a cache of that sidecar. With the JSON backend the file is the unit document, typically `verifier_trace.json` under the profile storage root.
+
+## 发布初期反馈
+
+回合里的问题写进会话通知，正文可以复制：有影响的入口判断失败、Jev 报错、费用暂停、没有合格候选，以及运行中抛出的错误。安装失败和能识别的 Desktop 导入问题发生在 `apply()` 里，这时还没有会话。那份草稿写到 stderr，前缀是 `dsh: verifier feedback`，然后原来的错误继续抛出。
+
+草稿包含插件版本、平台、决策点、结果、原因代码、丢弃原因代码、分数摘要、费用范围、计入来源，以及人民币已用和上限。原因和丢弃原因只保留已知代码，不保留模型或提供者返回的自由文本。它不包含 API key、用户原文、候选标题和完整会话记录。同一会话里相同指纹在成功写出之后只保留一次。指纹在进程内存里：追加或返回通知成功后才记下，失败可以再试。同一进程里两起失败如果重叠，可能各写一次。
+
+`feedback.enabled` 默认开启。通知里是可复制的正文。`feedback.autoOpenGithub` 默认关闭。打开后，通知里多一条预填链接（`litianyi-007/dsh-verifier-mode` 的新建页面，带标题和正文）。请复制正文，或只打开这条链接。默认路径不需要 GitHub token。
+
+这个功能的 MVP 不包含静默执行 `gh issue create`，也不包含用 token 调用 GitHub API 自动建 issue。
 
 This document does not claim that a live TypeSafe call has been verified against a real account.
