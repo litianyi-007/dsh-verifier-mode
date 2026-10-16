@@ -35,6 +35,10 @@ export const en = {
   'cfg.pro.help': 'Per-session cap in CNY. Default ¥4. Choices: 1, 2, 4, 8.',
   'cfg.unknown.label': 'Unknown model cap',
   'cfg.unknown.help': 'Per-session cap in CNY for a model that is not flash or pro. Default ¥1, the lowest known tier. Choices: 0.5, 1, 2, 4.',
+  'cfg.feedback.label': 'Issue draft',
+  'cfg.feedback.help': 'On by default. A reportable failure adds a copyable Markdown draft to the session notice. The draft leaves out keys, the raw prompt, and the full transcript.',
+  'cfg.feedbackOpen.label': 'GitHub issue link',
+  'cfg.feedbackOpen.help': 'Off by default. When on, the notice also includes a prefilled new-issue link. Filing stays manual and does not need a token.',
 } as const
 
 export const zh = {
@@ -73,6 +77,10 @@ export const zh = {
   'cfg.pro.help': '每会话上限，单位人民币 CNY。默认 4。可选 1、2、4、8。',
   'cfg.unknown.label': '未登记模型上限',
   'cfg.unknown.help': '未登记模型的会话上限，单位人民币 CNY。默认 1，取已知模型里最低的一档。可选 0.5、1、2、4。',
+  'cfg.feedback.label': '问题草稿',
+  'cfg.feedback.help': '出错时附上可复制的 Markdown 草稿。默认开启。不含密钥、用户原文和完整会话。',
+  'cfg.feedbackOpen.label': '附带 GitHub 链接',
+  'cfg.feedbackOpen.help': '通知里附上预填的新建 issue 链接。默认关闭。不自动创建，也不需要 token。',
 } as const
 
 export type VerifierLocaleKey = keyof typeof en

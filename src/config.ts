@@ -6,6 +6,8 @@ import { isVolatile } from '@deepseek-ai/cosmokit'
 import z from '@deepseek-ai/schemastery'
 import { CONFIGURE_HELP } from './configure-help.ts'
 import { TYPESAFE_API_KEY_REF } from './credential-ref.ts'
+import { resolveFeedback } from './feedback.ts'
+import type { FeedbackSettings } from './feedback.ts'
 import { DEFAULT_PRICING, FLASH_ROUTE, PRO_ROUTE } from './pricing.ts'
 import type { PricingTable } from './pricing.ts'
 import type { CostScope } from './cost-book.ts'
@@ -31,6 +33,8 @@ export interface ResolvedConfig {
     /** Design §8 A, or the tighter generator+Jev scope. */
     scope: CostScope
   }
+  /** Early-release draft. The GitHub link is opt-in and needs no token. */
+  feedback: FeedbackSettings
   pricing: PricingTable
 }
 
@@ -95,6 +99,12 @@ export const Config = z.object({
     maxPerSession: 1,
     maxPerSessionByModel: { [FLASH_ROUTE]: 1, [PRO_ROUTE]: 4 },
   }).description(CONFIGURE_HELP.currency),
+  feedback: z.object({
+    enabled: z.boolean().default(true).volatile()
+      .description(CONFIGURE_HELP.feedbackEnabled),
+    autoOpenGithub: z.boolean().default(false).volatile()
+      .description(CONFIGURE_HELP.feedbackAutoOpen),
+  }).default({ enabled: true, autoOpenGithub: false }),
   pricing: z.object({
     offPeakFactor: z.number().default(0.5),
     holidays: z.array(z.string()).default([]),
@@ -129,6 +139,7 @@ interface ConfigInput {
   thresholds?: { violation?: number; confidenceFloor?: number; tieGap?: number }
   weights?: { addresses?: number; grounded?: number; verifiable?: number; scope?: number }
   cost?: { maxPerSession?: number; maxPerSessionByModel?: Record<string, number>; scope?: unknown }
+  feedback?: { enabled?: unknown; autoOpenGithub?: unknown }
   pricing?: { offPeakFactor?: number; holidays?: string[]; usdToCny?: number; margin?: number }
 }
 
@@ -177,6 +188,7 @@ export function resolveConfig(input: unknown): ResolvedConfig {
       },
       scope: raw.cost?.scope === 'generator_jev_only' ? 'generator_jev_only' : 'design',
     },
+    feedback: resolveFeedback(raw.feedback),
     pricing: {
       ...DEFAULT_PRICING,
       offPeakFactor: raw.pricing?.offPeakFactor ?? DEFAULT_PRICING.offPeakFactor,

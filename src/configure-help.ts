@@ -13,6 +13,8 @@ export const CONFIGURE_HELP = {
   proCap: 'deepseek-v4-pro 的会话上限，单位人民币 CNY。默认 4。可选 1、2、4、8。',
   currency: '上限和累计都是人民币 CNY，不是美元。Jev 的美元标价会按汇率折进这笔账。',
   unknownCap: '未登记模型的会话上限，单位人民币 CNY。默认 1，取已知模型里最低的一档。',
+  feedbackEnabled: '问题草稿。默认开启。出错时通知里给出可复制的 Markdown，便于手动开 issue。不含密钥、用户原文和完整会话。',
+  feedbackAutoOpen: '附带 GitHub 链接。默认关闭。打开后通知里多一条预填的新建 issue 链接，仍需手动提交，不需要 GitHub token。',
 } as const
 
 export const CANDIDATE_PRESETS = [2, 3, 4, 5] as const
