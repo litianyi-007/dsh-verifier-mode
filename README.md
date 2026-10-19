@@ -12,7 +12,7 @@ Node must satisfy DSH's engines field (`^22.19` or `>=24`). On a machine whose d
 # one-time: clone DSH next to this repo, or anywhere, and install it
 git clone https://github.com/deepseek-ai/deepseek-harness.git
 cd deepseek-harness
-git checkout 5badb15009ae1756c3afe0ae0cef1faafc290ccc
+git checkout dsh-v0.2.1-rc.2
 pnpm install
 
 cd /path/to/dsh-verifier-mode
@@ -26,7 +26,11 @@ DSH_ROOT=/absolute/path/to/deepseek-harness npm test
 
 This section is separate from the offline mock suite above. The suite does not install the plugin into a DeepSeek Harness profile and does not call TypeSafe.
 
-Peer ranges target DeepSeek Harness Desktop `0.2.0-rc.2` and later `0.2.x` hosts, including `0.2.1-alpha.1`. Every `@deepseek-ai/dsh-*` peer is `^0.2.0-rc.2 || ^0.2.1-alpha.1`. `@deepseek-ai/schemastery` is `3.18.4 || >=3.18.5-alpha.1 <4` and `@deepseek-ai/cordis` is `4.0.4 || >=4.0.5-alpha.1 <5`, so the copies Desktop `0.2.0-rc.2` ships (`schemastery@3.18.4`, `cordis@4.0.4`) satisfy the declaration along with the `0.2.1-alpha.1` line.
+Desktop and Web are supported through **0.2.1-rc.2**, and on 0.2.x generally. `engines.dsh` is `>=0.2.0-rc.2 <0.3.0`. Installation and profile startup read that field first, with prereleases included, and then ignore `@deepseek-ai/dsh*` peer ranges. The publish guide's sample `>=0.2.0 <0.3.0` would refuse Desktop `0.2.0-rc.2`, because that prerelease sorts below `0.2.0`, so the declared floor stays `0.2.0-rc.2`.
+
+Every `@deepseek-ai/dsh-*` peer, including `@deepseek-ai/dsh-api-remotes`, stays `^0.2.0-rc.2 || ^0.2.1-alpha.1`. With prereleases included that range already admits `0.2.1-rc.2`. Tag `dsh-v0.2.1-rc.2` vendors `@deepseek-ai/cordis@4.0.5` and `@deepseek-ai/schemastery@3.18.5`. The existing peers (`cordis` `4.0.4 || >=4.0.5-alpha.1 <5`, `schemastery` `3.18.4 || >=3.18.5-alpha.1 <4`) already admit those versions and the Desktop `0.2.0-rc.2` copies (`cordis@4.0.4`, `schemastery@3.18.4`).
+
+Many `@deepseek-ai/dsh-*` npm `latest` tags are stale. On 2026-10-19, `latest` for `@deepseek-ai/dsh-agent` was `0.1.0-rc.6`, and `latest` for `@deepseek-ai/dsh-llm`, `@deepseek-ai/dsh-session`, and `@deepseek-ai/dsh-api-remotes` was `0.0.1-rc.1`. The `next` tag is the one that points at `0.2.1-rc.2`. A default `npm install` of those packages does not fetch this release. Use the `next` dist-tag, or the copies Desktop and Web already ship.
 
 Desktop's packaged host runs compiled JavaScript. It does not compile a TypeScript plugin. `main` and `exports` point at `lib/index.js` (host) and `lib/client.js` (the browser factory `window.__ModuleLoader__.load` expects). Those files are committed, so `dsh plugin add` of a local path or a `github:` URL can load them without pnpm's `allowBuilds` permission. `prepare` runs `node build.mjs` when a local install is allowed to build. The build does not need a deepseek-harness checkout.
 
@@ -46,7 +50,7 @@ Use the `dsh` that ships with Desktop. That binary is `resources/runtime/cli/bin
 dsh plugin --profile desktop add github:litianyi-007/dsh-verifier-mode
 ```
 
-A stable local directory is the other install that Desktop can reload from. Quit Desktop first, then:
+A stable local directory is the other install that Desktop can reload from, and it is the reinstall path on Desktop 0.2.1-rc.2. Quit Desktop first, then run this with the Desktop `dsh` after you pull this update:
 
 ```bash
 dsh plugin --profile desktop add /absolute/path/to/dsh-verifier-mode
@@ -83,7 +87,7 @@ dsh plugin --profile web add /absolute/path/to/dsh-verifier-mode
 
 From inside the checkout, that is `dsh plugin --profile web add .`
 
-That command is the profile install in the DeepSeek Harness guide, [Package and install a plugin](https://github.com/deepseek-ai/deepseek-harness/blob/5badb15009ae1756c3afe0ae0cef1faafc290ccc/docs/user/develop/basic/publish.md#install-into-a-profile). The guide's example is `dsh plugin --profile demo add ./hello-plugin`. Then start the Web UI with `dsh web`.
+That command is the profile install in the DeepSeek Harness guide, [Package and install a plugin](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.1-rc.2/docs/user/develop/basic/publish.md#install-into-a-profile). The guide's example is `dsh plugin --profile demo add ./hello-plugin`. Then start the Web UI with `dsh web`. On Web 0.2.1-rc.2, reinstall the same way: quit the running `dsh web`, then `dsh plugin --profile web add /absolute/path/to/dsh-verifier-mode`.
 
 The DeepSeek key is set on Settings → Models. Plugins → dsh-verifier-mode → Configure sets the TypeSafe key and the live knobs: candidate count K (2–5, default 3), the CNY per-session caps (flash default ¥1, pro default ¥4; `tokenbox/deepseek-flash` and the old `deepseek-v4-flash` name use the flash tier), which sources count toward that cap (design A by default: candidates, every Jev call, and main steps after a D4 steer; ordinary main-loop usage does not), the intake gate (automatic by default, or always-on for debugging), the D4 audit switch, and the early-release feedback switches. That page is there only after this plugin is installed.
 
