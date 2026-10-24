@@ -15,7 +15,21 @@ const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url),
   main: string
   exports: Record<string, string>
   scripts: Record<string, string>
+  engines: { node: string; dsh: string }
+  peerDependencies: Record<string, string>
+  dsh: { client: { inject: string[] } }
 }
+
+const DSH_PEER = '^0.2.0-rc.2 || ^0.2.1-alpha.1'
+
+it('declares engines.dsh and peers the client inject already names', () => {
+  expect(pkg.engines.dsh).toBe('>=0.2.0-rc.2 <0.3.0')
+  expect(pkg.dsh.client.inject).toContain('@deepseek-ai/dsh-api-remotes')
+  expect(pkg.peerDependencies['@deepseek-ai/dsh-api-remotes']).toBe(DSH_PEER)
+  for (const [name, range] of Object.entries(pkg.peerDependencies)) {
+    if (name.startsWith('@deepseek-ai/dsh-')) expect(range).toBe(DSH_PEER)
+  }
+})
 
 it('points main and exports at the committed lib entry', () => {
   expect(pkg.main).toBe('./lib/index.js')
